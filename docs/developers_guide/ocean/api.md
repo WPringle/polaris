@@ -287,6 +287,30 @@
    viz.Viz.run
 ```
 
+### great_lakes
+
+```{eval-rst}
+.. currentmodule:: polaris.tasks.ocean.great_lakes
+
+.. autosummary::
+   :toctree: generated/
+
+   add_great_lakes_tasks
+   lakes.GREAT_LAKES
+
+   task.GreatLakesMeshTask
+
+   mesh.spherical.GreatLakesSphericalMesh
+
+   topo.bathymetry.PrepareBathymetryStep
+   topo.mask.WetMaskOnMeshStep
+   topo.coarsen.CoarsenBathymetryStep
+   topo.map.GreatLakesTopoMap
+   topo.remap.GreatLakesTopoRemap
+
+   cull.GreatLakesCullMesh
+```
+
 ### horiz_press_grad
 
 ```{eval-rst}

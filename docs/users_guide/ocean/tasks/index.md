@@ -15,6 +15,7 @@ customizable_viz
 external_gravity_wave
 feature_masks
 geostrophic
+great_lakes
 realistic_global
 horiz_press_grad
 divergent_2d

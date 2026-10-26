@@ -28,6 +28,9 @@ docs/_build/
 
 # pixi
 .pixi/
+
+# local downloaded datasets (e.g. Great Lakes bathymetry), never committed
+/data/
 .pixi-cache/
 pixi.lock
 pixi-env/
