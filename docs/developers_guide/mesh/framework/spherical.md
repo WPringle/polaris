@@ -155,6 +155,19 @@ cell-polygon quality check outright. Because the cull diagnostic reports a
 *minimum* over millions of edges, a kernel that improves the bulk and
 worsens the tail is a net loss.
 
+## Graded (non-uniform) sizing grids
+
+`make_jigsaw_mesh()` hands JIGSAW's `ELLIPSOID-GRID` hfun two 1-D lon/lat
+coordinate arrays that must be monotonic but need not be uniformly spaced.
+A uniform global grid fine enough to resolve a small region at, say, 1 km
+resolution would have on the order of 10^8 points.
+{py:func}`polaris.mesh.spherical.graded_grid.build_graded_lon_lat()` builds
+a grid that is uniform and fine within a region of interest and coarsens
+geometrically outward to a background resolution, keeping the point count
+tractable for a regional mesh built on the full sphere (see
+{py:mod}`polaris.tasks.ocean.great_lakes.mesh.spherical` for a worked
+example).
+
 ## Reconstruction weights
 
 {py:class}`polaris.mesh.spherical.SphericalBaseStep` can add cell-centered
