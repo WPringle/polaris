@@ -14,7 +14,7 @@ builds a single global mesh from shared global coastline and river
 datasets, and cannot be scoped to a small region. `isomip_plus`'s
 small-region spherical mesh uses a synthetic coastline, not a real DEM.
 
-Success is a culled MPAS mesh per basin with cell width 925 m at the
+Success is a culled MPAS mesh per basin with cell width 812.5 m at the
 shoreline, capped at 3.25 km in the open lake, and `base_elevation` from the
 DEM on the mesh.
 
@@ -36,6 +36,13 @@ from shore, on both the water and land sides of the coastline. 0.8125 km
 is `max_resolution_km / 4` and close to 3x the ~270 m pixel spacing of the
 coarsened bathymetry used for the final remap, so the remap source stays
 several times finer than the target resolution.
+
+Cell width is also 0.8125 km (812.5 m) -- matching the shoreline target --
+wherever bathymetric slope exceeds `slope_threshold_high` = 0.1
+(dimensionless: m of depth change per m of horizontal distance, i.e. a 10%
+grade), ramping in from `max_resolution_km` starting at
+`slope_threshold_low` = 0.02 (a 2% grade); see "Algorithm Design:
+Slope-based refinement" for why and how this is computed.
 
 ### Requirement: Mesh domain
 
@@ -67,7 +74,7 @@ Date last modified: 2026/10/22
 `QuasiUniformSphericalMeshStep.make_jigsaw_mesh()` writes JIGSAW's sizing
 function as an `ELLIPSOID-GRID` hfun from two 1-D lon/lat coordinate
 arrays, which must be monotonic but need not be uniform. A uniform global
-grid fine enough for 925 m resolution would have on the order of 10^8
+grid fine enough for 812.5 m resolution would have on the order of 10^8
 points. Instead, `polaris.mesh.spherical.graded_grid.build_graded_lon_lat`
 builds a grid that is uniform and fine over the lake's bounding box
 (padded by `region_buffer_deg`) and coarsens geometrically outward to a
@@ -381,28 +388,27 @@ grid when the fine and coarse resolutions match.
 
 ### Testing and Validation: End-to-end mesh
 
-Date last modified: 2026/10/23
+Date last modified: 2026/10/26
 
-Run end-to-end for Lake Erie via `polaris setup` +
-`polaris serial` on NERSC Perlmutter (`pm-cpu`, gnu/mpich), with the
-downloaded NOAA `erie_lld.grd.gz` bathymetry. The full step graph
-(`bathymetry` -> `base_mesh` -> `wet_mask` -> `cull_mesh` -> `coarsen` ->
-`topo_map_culled` -> `topo_remap_culled`) completed successfully,
-producing a 6,289-cell culled mesh with `base_elevation` ranging from
--61.8 m to -0.09 m (all negative, as expected after the topography
-normalization fix -- see "Algorithm Design: Topography normalization")
-and `oceanFraction` > 0 for 6,287 of 6,289 cells (mean 0.97). With
-`coarsen_factor=3`, the weight-computation step (`topo_map_culled`,
-17.3M native DEM points coarsened to 1.92M) completed in 4 m 47 s, versus
-55+ minutes with no completion in sight at native resolution before the
-coarsening step was added.
+First run end-to-end for Lake Erie via `polaris setup` + `polaris serial`
+on NERSC Perlmutter (`pm-cpu`, gnu/mpich), with the downloaded NOAA
+`erie_lld.grd.gz` bathymetry, to validate the step graph and the
+`coarsen_factor` performance fix (at the pre-fix `coastal_resolution_km` =
+`slope_resolution_km` = 0.925 km): the full step graph (`bathymetry` ->
+`base_mesh` -> `wet_mask` -> `cull_mesh` -> `coarsen` -> `topo_map_culled`
+-> `topo_remap_culled`) completed successfully, producing a 6,289-cell
+culled mesh with `base_elevation` ranging from -61.8 m to -0.09 m (all
+negative, as expected after the topography normalization fix -- see
+"Algorithm Design: Topography normalization") and `oceanFraction` > 0 for
+6,287 of 6,289 cells (mean 0.97). With `coarsen_factor=3`, the
+weight-computation step (`topo_map_culled`, 17.3M native DEM points
+coarsened to 1.92M) completed in 4 m 47 s, versus 55+ minutes with no
+completion in sight at native resolution before the coarsening step was
+added. Ontario was also run at this point (full task runtime 2 m 16 s).
 
-Also run end-to-end for Ontario (full task runtime 2 m 16 s). The
-`michigan_huron` combined basin is a substantially larger domain (lon
--88.0 to -79.68, lat 41.62 to 46.5, versus Erie's -83.7 to -78.5,
-41.2-43.0) and is running as of this writing.
-
-Superior has been run end-to-end three times as this fix was developed:
+Superior was run end-to-end three times as the slope/trough fix was
+developed, each still at `coastal_resolution_km` = `slope_resolution_km`
+= 0.925 km:
 
 1. With coastal-distance refinement only: deepest cell -350 m.
 2. Adding slope-based refinement (`_fill_enclosed_steep_regions` not yet
@@ -410,8 +416,7 @@ Superior has been run end-to-end three times as this fix was developed:
    pixel at -405.1 m, with an effective resolution there of only about
    2.83 km, since the trough floor's own slope never triggered refinement
    (see "Algorithm Design: Slope-based refinement").
-3. Adding `_fill_enclosed_steep_regions` (at `slope_resolution_km` =
-   `coastal_resolution_km` = 0.925 km, `slope_fill_radius_km` = 2.0):
+3. Adding `_fill_enclosed_steep_regions` (`slope_fill_radius_km` = 2.0):
    mesh cell count rose from 19,553 to 20,634 (+5.5%), the trough floor's
    resolution reached 0.94 km (vs. 2.83 km before), and the deepest cell
    reached -389.7 m -- about 22 m deeper than before, and within 15.4 m
@@ -421,9 +426,41 @@ Superior has been run end-to-end three times as this fix was developed:
 
 `coastal_resolution_km` and `slope_resolution_km` were then both dropped
 to 0.8125 km (`max_resolution_km / 4`; see "Requirement: Mesh resolution").
-Idealized area-averaging at this trough gives about -401.4 m for either
-0.8125 km or 0.75 km (they round to the same averaging window on the
-3x-coarsened remap source, so there's no benefit to going finer than
-0.8125 km without also reducing `coarsen_factor`). Rerunning Superior
-end-to-end with 0.8125 km to confirm the real-world result is still
-pending.
+Idealized area-averaging at Superior's trough gives about -401.4 m for
+either 0.8125 km or 0.75 km (they round to the same averaging window on
+the 3x-coarsened remap source, so there's no benefit to going finer than
+0.8125 km without also reducing `coarsen_factor`).
+
+All four basins were rerun end-to-end at `coastal_resolution_km` =
+`slope_resolution_km` = 0.8125 km, `slope_fill_radius_km` = 2.0 (each on
+an interactive or `shared`-QOS Perlmutter allocation, with
+`MPICH_GPU_SUPPORT_ENABLED=0` -- the shell's default of 1 otherwise aborts
+`mbconvert`, which isn't linked with GPU/GTL support, on a CPU-only node):
+
+- **Ontario**: succeeded in 2 m 45 s; 5,632 cells; deepest cell -225.7 m
+  at 3.10 km resolution (its deepest point is a broad basin floor, not an
+  enclosed trough, so the slope/trough fix has no effect there).
+- **Erie**: succeeded in 10 m 20 s; 6,936 cells (vs. 6,289 at 0.925 km,
+  +10.3%, from the finer shoreline target, not the trough fix); deepest
+  cell -61.8 m at 3.23 km resolution (also a broad floor, not a trough).
+- **Superior**: succeeded in 42 m 39 s; 23,433 cells (vs. 20,634 at
+  0.925 km with the trough fix, vs. 19,553 with coastal-distance
+  refinement only -- a cumulative +19.8%); deepest cell -401.2 m at
+  (46.9195N, 86.5955W), resolution 0.83 km -- within 4 m of the native-DEM
+  truth (-405.1 m) and matching the -401.4 m idealized area-averaging
+  estimate almost exactly, a much tighter match than the 0.925 km case's
+  -389.7 m against its -399 m estimate.
+- **Michigan-Huron**: succeeded in 1 h 23 m 40 s (longest of the four,
+  from its larger combined domain -- `topo_map_culled` alone took
+  1 h 10 m 24 s); 33,884 cells; deepest cell -271.4 m at (44.6897N,
+  86.7345W), resolution 3.28 km (a broad basin floor near Lake Michigan's
+  own deep basin, not an enclosed trough, so again outside what the
+  slope/trough fix targets).
+
+All four basins now build successfully end-to-end at the final
+`coastal_resolution_km` = `slope_resolution_km` = 0.8125 km,
+`slope_fill_radius_km` = 2.0 configuration. Of the four, only Superior's
+bathymetry has an enclosed steep-walled trough deep enough for
+`_fill_enclosed_steep_regions` to matter; Erie, Ontario, and
+Michigan-Huron's deepest points are broad basin floors already well
+captured by the coastal-distance and plain slope-ramp refinement alone.
