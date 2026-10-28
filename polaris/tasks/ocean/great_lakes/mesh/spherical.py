@@ -100,12 +100,27 @@ class GreatLakesSphericalMesh(QuasiUniformSphericalMeshStep):
         slope_threshold_high = section.getfloat('slope_threshold_high')
         slope_exponent = section.getfloat('slope_transition_exponent')
         slope_fill_radius_km = section.getfloat('slope_fill_radius_km')
+        length_scale_km = section.getfloat('length_scale_resolution_km')
+        length_scale_threshold_low = section.getfloat(
+            'length_scale_threshold_low_km'
+        )
+        length_scale_threshold_high = section.getfloat(
+            'length_scale_threshold_high_km'
+        )
+        length_scale_exponent = section.getfloat(
+            'length_scale_transition_exponent'
+        )
+        length_scale_fill_radius_km = section.getfloat(
+            'length_scale_fill_radius_km'
+        )
 
         logger.info(
             f'Building cell width for {self.lake_name}: refining to '
-            f'{coastal_km} km at the coast and in high-slope regions, plus '
-            f'flat valleys enclosed by steep walls (needed to resolve Lake '
-            f"Superior's glacial troughs)"
+            f'{coastal_km} km at the coast, in high-slope regions, and '
+            f'wherever the topographic length scale is short, plus flat '
+            f'valleys enclosed by steep walls or short-length-scale '
+            f'terrain (needed to resolve real glacial troughs that a '
+            f'single slope threshold misses on gentler-sloped basins)'
         )
 
         with open_dataset('bathymetry.nc') as ds_bathy:
@@ -142,9 +157,9 @@ class GreatLakesSphericalMesh(QuasiUniformSphericalMeshStep):
             exponent=exponent,
         )
 
-        slope, dx_m, dy_m = _bathymetric_slope(
-            elevation, ocean_mask, bathy_lon, bathy_lat
-        )
+        dx_m, dy_m = _native_grid_spacing_m(bathy_lon, bathy_lat)
+
+        slope = _bathymetric_slope(elevation, ocean_mask, dx_m, dy_m)
         slope_width_native = _slope_cell_width(
             slope=slope,
             max_km=max_km,
@@ -157,9 +172,8 @@ class GreatLakesSphericalMesh(QuasiUniformSphericalMeshStep):
         # a trough floor fully enclosed by steep walls should be refined
         # too, even where its own local slope is too low to trigger the
         # ramp above (see the design doc's 'Slope-based refinement' section)
-        closed_steep = _fill_enclosed_steep_regions(
-            slope=slope,
-            threshold_high=slope_threshold_high,
+        closed_steep = _fill_enclosed_region(
+            mask=slope >= slope_threshold_high,
             dx_m=dx_m,
             dy_m=dy_m,
             radius_km=slope_fill_radius_km,
@@ -169,8 +183,45 @@ class GreatLakesSphericalMesh(QuasiUniformSphericalMeshStep):
             np.where(closed_steep, slope_km, max_km),
         )
 
+        # the topographic length scale is a scale-aware complement to the
+        # raw slope threshold above (see _topographic_length_scale's
+        # docstring); it is only evaluated outside the coastal-transition
+        # buffer, since he collapses toward zero in shallow water near any
+        # shoreline regardless of how gentle the slope actually is there
+        # -- a case the coastal-distance ramp above already handles
+        length_scale = _topographic_length_scale(
+            elevation, ocean_mask, dx_m, dy_m
+        )
+        within_coastal_buffer = np.abs(signed_distance) <= (
+            transition_km * 1.0e3
+        )
+        length_scale = np.where(within_coastal_buffer, np.inf, length_scale)
+
+        length_scale_width_native = _length_scale_cell_width(
+            length_scale=length_scale,
+            max_km=max_km,
+            length_scale_km=length_scale_km,
+            threshold_low=length_scale_threshold_low,
+            threshold_high=length_scale_threshold_high,
+            exponent=length_scale_exponent,
+        )
+
+        closed_short_length_scale = _fill_enclosed_region(
+            mask=length_scale <= length_scale_threshold_low,
+            dx_m=dx_m,
+            dy_m=dy_m,
+            radius_km=length_scale_fill_radius_km,
+        )
+        length_scale_width_native = np.minimum(
+            length_scale_width_native,
+            np.where(closed_short_length_scale, length_scale_km, max_km),
+        )
+
         coastal_width_native = np.minimum(
             coastal_width_native, slope_width_native
+        )
+        coastal_width_native = np.minimum(
+            coastal_width_native, length_scale_width_native
         )
 
         cell_width = _paste_onto_graded_grid(
@@ -222,27 +273,32 @@ def _coastal_cell_width(
     return cell_width
 
 
-def _bathymetric_slope(elevation, ocean_mask, bathy_lon, bathy_lat):
+def _native_grid_spacing_m(bathy_lon, bathy_lat):
     """
-    Magnitude of the local bathymetric gradient (dimensionless: m of depth
-    change per m of horizontal distance) on the native bathymetry grid,
-    zero on land and wherever a neighboring point is land or missing (so
-    it never refines the coastline itself, only interior steep features;
-    the coastal-distance blend already handles the shoreline).
-
-    Also returns the native grid spacing in meters (``dx_m``, ``dy_m``)
-    used to compute the gradient, for reuse by other steps that need the
-    same native-resolution length scale (e.g.
-    ``_fill_enclosed_steep_regions``).
+    Native bathymetry grid spacing in meters, converting lon/lat spacing
+    using the mean latitude of the basin's own bounding box (precise
+    enough given a basin spans only a few degrees of latitude). Shared by
+    ``_bathymetric_slope`` and ``_topographic_length_scale``, which both
+    need the same native-resolution length scale.
     """
     earth_radius = get_constant('mean_radius')
     meters_per_deg = (np.pi / 180.0) * earth_radius
     dlat_deg = float(bathy_lat[1] - bathy_lat[0])
     dlon_deg = float(bathy_lon[1] - bathy_lon[0])
     mean_lat_rad = np.radians(np.mean(bathy_lat))
-    dx_m = dlon_deg * meters_per_deg * np.cos(mean_lat_rad)
-    dy_m = dlat_deg * meters_per_deg
+    dx_m = abs(dlon_deg * meters_per_deg * np.cos(mean_lat_rad))
+    dy_m = abs(dlat_deg * meters_per_deg)
+    return dx_m, dy_m
 
+
+def _bathymetric_slope(elevation, ocean_mask, dx_m, dy_m):
+    """
+    Magnitude of the local bathymetric gradient (dimensionless: m of depth
+    change per m of horizontal distance) on the native bathymetry grid,
+    zero on land and wherever a neighboring point is land or missing (so
+    it never refines the coastline itself, only interior steep features;
+    the coastal-distance blend already handles the shoreline).
+    """
     elevation_filled = np.where(ocean_mask, elevation, 0.0)
     dzdy, dzdx = np.gradient(elevation_filled, dy_m, dx_m)
     slope = np.hypot(dzdx, dzdy)
@@ -256,23 +312,83 @@ def _bathymetric_slope(elevation, ocean_mask, bathy_lon, bathy_lat):
     valid[:, 1:] &= ocean_mask[:, :-1]
     valid[:, :-1] &= ocean_mask[:, 1:]
 
-    return np.where(valid, slope, 0.0), abs(dx_m), abs(dy_m)
+    return np.where(valid, slope, 0.0)
 
 
-def _fill_enclosed_steep_regions(slope, threshold_high, dx_m, dy_m, radius_km):
+def _topographic_length_scale(elevation, ocean_mask, dx_m, dy_m):
     """
-    Close the mask of cells with ``slope >= threshold_high`` via two
-    Euclidean distance transforms -- dilate by thresholding the distance to
-    the nearest steep cell, then erode that dilated mask by thresholding
-    the distance to its complement (``erosion(A) = NOT(dilation(NOT(A)))``)
-    -- so that low-slope pockets fully enclosed by a (possibly gappy) ring
-    of steep cells -- e.g. a flat trough floor ringed by steep trough walls
-    -- are refined too, even though their own local slope never crosses
-    ``threshold_high``. Unlike dilating every steep cell outward by
-    ``radius_km`` alone (which would also expand refinement along ordinary,
-    unenclosed steep terrain such as shoreline drop-offs), closing only
-    fills pockets that are actually enclosed, bridging wall gaps up to
-    about ``radius_km`` wide.
+    A scale-aware alternative to raw bathymetric slope: the topographic
+    length scale ``L = he / |grad(H)|``, where ``he = h1*h2/(h1+h2)`` is
+    the harmonic-mean-like "effective depth" between two neighboring
+    native-grid depths ``h1``, ``h2`` (the same combination that sets the
+    two-layer internal wave speed ``c = sqrt(g' * he)`` in gravity-
+    current/exchange-flow theory, e.g. strait sill flows). ``L`` has units
+    of length: how far, at the local depth gradient, depth would need to
+    change by its own effective scale -- so, unlike a raw slope threshold,
+    it responds to *relative* depth change. This is what lets one shared
+    threshold work across lakes with very different native steepness (see
+    ``length_scale_threshold_low_km``'s comment in ``great_lakes_mesh.cfg``):
+    checked directly against all four Great Lakes basins' native DEMs, one
+    threshold gives similar, modest cost increases for every lake, where a
+    raw slope threshold either misses Lake Michigan-Huron's real (but
+    comparatively gentle) troughs or drastically over-refines Lake
+    Superior.
+
+    ``L`` is computed separately between x- and y-direction neighbor pairs
+    on the native grid, each pair's value assigned to both of its
+    endpoints, and the two directions combined by taking the smaller
+    (more restrictive) value at each point. Returns ``inf`` (km) wherever
+    two neighboring depths are equal (no local gradient) or both
+    neighbors are land (``he = 0`` there), so flat or dry regions never
+    drive refinement on their own.
+
+    Returns
+    -------
+    length_scale_km : numpy.ndarray
+        the topographic length scale in km
+    """
+    depth = np.where(ocean_mask, -elevation, 0.0)
+
+    def _pair_length_scale(h1, h2, spacing_m):
+        depth_sum = h1 + h2
+        he = np.where(
+            depth_sum > 0.0,
+            h1 * h2 / np.where(depth_sum > 0.0, depth_sum, 1.0),
+            0.0,
+        )
+        diff = np.abs(h2 - h1)
+        safe_diff = np.where(diff > 0.0, diff, 1.0)
+        return np.where(diff > 0.0, he * spacing_m / safe_diff, np.inf)
+
+    length_x = _pair_length_scale(depth[:, :-1], depth[:, 1:], dx_m)
+    length_y = _pair_length_scale(depth[:-1, :], depth[1:, :], dy_m)
+
+    length_scale_x = np.full(depth.shape, np.inf)
+    length_scale_x[:, :-1] = np.minimum(length_scale_x[:, :-1], length_x)
+    length_scale_x[:, 1:] = np.minimum(length_scale_x[:, 1:], length_x)
+
+    length_scale_y = np.full(depth.shape, np.inf)
+    length_scale_y[:-1, :] = np.minimum(length_scale_y[:-1, :], length_y)
+    length_scale_y[1:, :] = np.minimum(length_scale_y[1:, :], length_y)
+
+    length_scale_m = np.minimum(length_scale_x, length_scale_y)
+    return length_scale_m / 1.0e3
+
+
+def _fill_enclosed_region(mask, dx_m, dy_m, radius_km):
+    """
+    Close ``mask`` via two Euclidean distance transforms -- dilate by
+    thresholding the distance to the nearest ``True`` cell, then erode
+    that dilated mask by thresholding the distance to its complement
+    (``erosion(A) = NOT(dilation(NOT(A)))``) -- so that ``False`` pockets
+    fully enclosed by a (possibly gappy) ring of ``True`` cells -- e.g. a
+    flat trough floor ringed by steep trough walls, or a long-length-scale
+    pocket ringed by short-length-scale walls -- are filled in too, even
+    though the pocket's own cells never satisfy the ``True`` condition.
+    Unlike dilating every ``True`` cell outward by ``radius_km`` alone
+    (which would also expand into ordinary, unenclosed ``True`` regions
+    such as a shoreline drop-off), closing only fills pockets that are
+    actually enclosed, bridging wall gaps up to about ``radius_km`` wide.
 
     This is equivalent to morphological closing with a disk/ellipse
     structuring element of radius ``radius_km``, but computed via scipy's
@@ -282,17 +398,21 @@ def _fill_enclosed_steep_regions(slope, threshold_high, dx_m, dy_m, radius_km):
     structuring element's pixel count and so does not scale to a basin's
     full native-resolution grid.
 
+    Shared by the slope-based and topographic-length-scale-based
+    refinement criteria in ``build_cell_width_lat_lon``, which each build
+    their own boolean trigger mask (``slope >= slope_threshold_high`` or
+    ``length_scale <= length_scale_threshold_low_km``) and pass it here.
+
     Returns
     -------
     closed : numpy.ndarray of bool
-        True wherever a cell is steep itself or lies in an enclosed pocket
-        that closing fills in
+        True wherever a cell is in ``mask`` itself or lies in an enclosed
+        pocket that closing fills in
     """
-    steep = slope >= threshold_high
     radius_m = radius_km * 1.0e3
     sampling = (dy_m, dx_m)
 
-    dilated = distance_transform_edt(~steep, sampling=sampling) <= radius_m
+    dilated = distance_transform_edt(~mask, sampling=sampling) <= radius_m
     return distance_transform_edt(dilated, sampling=sampling) > radius_m
 
 
@@ -317,6 +437,39 @@ def _slope_cell_width(
         ** exponent
     )
     cell_width[in_transition] = max_km + fraction * (slope_km - max_km)
+    return cell_width
+
+
+def _length_scale_cell_width(
+    length_scale,
+    max_km,
+    length_scale_km,
+    threshold_low,
+    threshold_high,
+    exponent,
+):
+    """
+    Blend from ``max_km`` to ``length_scale_km`` as the topographic length
+    scale decreases from ``threshold_high`` to ``threshold_low`` -- the
+    same transition idiom as ``_slope_cell_width``, but inverted, since a
+    *smaller* length scale (not a larger one) means more refinement is
+    needed.
+    """
+    cell_width = np.full(length_scale.shape, max_km, dtype=float)
+    span = threshold_high - threshold_low
+
+    if span <= 0.0:
+        cell_width[length_scale <= threshold_low] = length_scale_km
+        return cell_width
+
+    in_transition = length_scale < threshold_high
+    fraction = (
+        np.clip(
+            (threshold_high - length_scale[in_transition]) / span, 0.0, 1.0
+        )
+        ** exponent
+    )
+    cell_width[in_transition] = max_km + fraction * (length_scale_km - max_km)
     return cell_width
 
 

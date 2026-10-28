@@ -42,7 +42,13 @@ wherever bathymetric slope exceeds `slope_threshold_high` = 0.1
 (dimensionless: m of depth change per m of horizontal distance, i.e. a 10%
 grade), ramping in from `max_resolution_km` starting at
 `slope_threshold_low` = 0.02 (a 2% grade); see "Algorithm Design:
-Slope-based refinement" for why and how this is computed.
+Slope-based refinement" for why and how this is computed. The same
+0.8125 km resolution is also reached wherever a second, scale-aware
+criterion -- a topographic length scale `L = he / |grad(H)|` -- drops to
+`length_scale_threshold_low_km` = 1.5 km or below, ramping in from
+`length_scale_threshold_high_km` = 4.0 km; see "Algorithm Design:
+Topographic length-scale refinement" for why this second criterion is
+needed alongside the slope-based one.
 
 ### Requirement: Mesh domain
 
@@ -188,6 +194,122 @@ Outside the buffered bounding box, cell width relaxes further to
 `signed_distance_from_geojson` against the box polygon -- the same
 primitive `isomip_plus`'s `SphericalMesh` uses, confirming it works on the
 full sphere, not only a plane.
+
+### Algorithm Design: Topographic length-scale refinement
+
+Date last modified: 2026/10/28
+
+The "Testing and Validation: End-to-end mesh" section's original claim
+that "only Superior's bathymetry has an enclosed steep-walled trough" was
+based on checking only each lake's single globally-deepest cell, not
+scanning the whole basin. Recomputing `_bathymetric_slope` directly
+against Michigan-Huron's native `bathymetry.nc` (same function, same
+production code path) showed two things that claim missed:
+
+- Michigan-Huron's native DEM is a genuinely different population from
+  Superior's/Erie's, not just a lake with a flatter deepest point: its
+  water-cell slope is roughly half of Superior's at *every* percentile
+  checked (median 0.0039 vs. 0.006, 90th 0.017 vs. 0.034, 99th 0.053 vs.
+  0.097). `slope_threshold_high = 0.1` was calibrated only against
+  Superior's and Erie's distributions (see "Algorithm Design: Slope-based
+  refinement"), so applied unchanged to Michigan-Huron it sits above
+  nearly all of its real bathymetric relief, not just ordinary
+  basin-floor roughness. Connected-component labeling of water cells
+  below -100 m finds several glacially-scoured Georgian Bay pockets (true
+  depth 108-126 m) whose own bounding-wall slope tops out at 0.04-0.06 --
+  real relief, but below `slope_threshold_high` -- so
+  `_fill_enclosed_steep_regions` never closes around them and they sit at
+  `max_resolution_km` almost throughout. Checked against the actual
+  end-to-end Michigan-Huron run
+  (`topo_remap_culled/topography_remapped.nc`): a pocket near
+  (-80.6, 44.9), true minimum -113.5 m, was smoothed to only -89.2 m (a
+  24.3 m / 21% bias), and a pocket near (-80.8, 44.9), true minimum
+  -123.4 m, reached only -118.0 m (5.4 m bias).
+- A separate, undocumented instance of the same class of bug turned up in
+  Lake Ontario, for a different reason: its deepest point (-243.9 m true)
+  was recorded as only -225.7 m (18.2 m bias), not because its wall slope
+  was too gentle, but because `slope_fill_radius_km = 2.0` falls just
+  short of the radius needed to bridge a gap in its trough wall.
+
+Lowering `slope_threshold_low`/`slope_threshold_high` and raising
+`slope_fill_radius_km` for Michigan-Huron alone (checked directly against
+an end-to-end rerun with `slope_threshold_low = 0.01`,
+`slope_threshold_high = 0.04`, `slope_fill_radius_km = 3.0`) did fix the
+Georgian Bay pockets (33,884 -> 46,042 cells, the -113.5 m pocket's bias
+down from 24.3 m to 2.6 m), but a single uniform *absolute* slope
+threshold cannot serve all four lakes at once: lowered enough to catch
+Michigan-Huron's gentle troughs, the same threshold applied to Superior
+pushes its closed-and-refined fraction from 2.3% to about 17% of the lake
+(+86% cells, 23,433 -> ~43,500) for no corresponding benefit, since
+Superior's own trough is already well-captured at the existing threshold.
+A per-basin override of the slope options would fix Michigan-Huron and
+Ontario without over-refining Superior/Erie, but at the cost of the four
+lakes no longer sharing one config -- rejected in favor of a refinement
+criterion that responds to *relative* depth change instead of an
+absolute slope value, so one shared threshold can work across lakes with
+very different native steepness.
+
+`_topographic_length_scale` computes, at each native-grid point, a
+topographic length scale `L = he / |grad(H)|`, where
+`he = h1*h2/(h1+h2)` is the harmonic-mean-like "effective depth" between
+two depths `h1`, `h2` on either side of a grid step. `he` is the same
+combination that sets the two-layer internal wave speed
+`c = sqrt(g' * he)` in gravity-current/exchange-flow theory (e.g. strait
+sill flows): a large, gentle basin and a steep-but-shallow shelf can have
+the same raw slope but very different `he`, and so very different `L`.
+`L` has units of length -- how far, at the local depth gradient, depth
+would need to change by its own effective scale -- and is computed
+pairwise along each grid axis (`x` and `y` separately, using the same
+lon/lat-to-meters conversion `_bathymetric_slope` already used, now
+factored into a shared `_native_grid_spacing_m` helper used by both),
+then combined via an elementwise minimum, so each point's `L` reflects
+its steepest nearby relative change in either direction.
+`_length_scale_cell_width` then ramps resolution from `max_resolution_km`
+at `length_scale_threshold_high_km` down to `length_scale_resolution_km`
+at `length_scale_threshold_low_km` -- the mirror image of
+`_slope_cell_width`'s ramp, since a *small* `L` means more refinement.
+
+`he` collapses toward zero in shallow water next to any shoreline,
+regardless of how gentle the real underwater slope is there, which would
+otherwise make `L` spuriously small along most of the coastline -- a
+near-coast artifact confirmed directly against both synthetic and real
+bathymetry (`L` dropping to 0 immediately next to land even where the
+true offshore slope is flat; see
+`test_topographic_length_scale_is_zero_next_to_land`). Since the
+coastal-distance ramp (see "Algorithm Design: Cell-width field") already
+refines this entire near-shore band on its own, `build_cell_width_lat_lon`
+sets `L = inf` wherever a point falls within `coastal_transition_km` of
+the shoreline, reusing the exact `signed_distance` array already computed
+once per lake via `signed_distance_from_ocean_mask` for that ramp (no new
+distance computation needed). Flat, long-`L` trough floors fully enclosed
+by a ring of short-`L` walls are closed the same way steep-walled trough
+floors are for the slope path: `_fill_enclosed_steep_regions` was
+generalized into `_fill_enclosed_region(mask, dx_m, dy_m, radius_km)`,
+taking a precomputed boolean trigger mask (`slope >= slope_threshold_high`
+for the existing path; `L <= length_scale_threshold_low_km` outside the
+coastal buffer for the new one) instead of computing it internally, so
+both paths share the same two-EDT morphological-closing implementation.
+
+Checked directly against all four lakes' native DEMs, with the
+coastal-buffer exclusion in place, one shared parameter set
+(`length_scale_threshold_low_km = 1.5`, `length_scale_threshold_high_km =
+4.0`, `length_scale_fill_radius_km = 3.0`) gives similar, modest cost
+increases for every lake and fixes both known bugs without per-lake
+tuning. End-to-end reruns of all four basins (Superior and Michigan-Huron
+via a `shared`-QOS Perlmutter batch job, account `m3780`; Erie and
+Ontario interactively; all with `MPICH_GPU_SUPPORT_ENABLED=0`) confirm
+the diagnostic -- see "Testing and Validation: End-to-end mesh" for the
+full results table.
+
+Unit tests for the new functions
+(`tests/ocean/great_lakes/mesh/test_spherical.py`:
+`test_topographic_length_scale_flat_region_is_infinite`,
+`test_topographic_length_scale_is_zero_next_to_land`,
+`test_topographic_length_scale_matches_pairwise_formula`,
+`test_length_scale_cell_width_ramps_between_thresholds`, plus three
+`_fill_enclosed_region` cases shared with the slope path) exercise the
+pairwise formula, the near-coast artifact, the ramp, and the
+closing/bridging/non-filling behavior on synthetic grids.
 
 ### Algorithm Design: Merging Michigan and Huron's bathymetry
 
@@ -457,10 +579,41 @@ an interactive or `shared`-QOS Perlmutter allocation, with
   own deep basin, not an enclosed trough, so again outside what the
   slope/trough fix targets).
 
-All four basins now build successfully end-to-end at the final
+All four basins now build successfully end-to-end at the
 `coastal_resolution_km` = `slope_resolution_km` = 0.8125 km,
-`slope_fill_radius_km` = 2.0 configuration. Of the four, only Superior's
-bathymetry has an enclosed steep-walled trough deep enough for
-`_fill_enclosed_steep_regions` to matter; Erie, Ontario, and
-Michigan-Huron's deepest points are broad basin floors already well
-captured by the coastal-distance and plain slope-ramp refinement alone.
+`slope_fill_radius_km` = 2.0 configuration above. Each lake's single
+globally-deepest point is a broad basin floor for Erie, Ontario, and
+Michigan-Huron, and only Superior's is an enclosed steep-walled trough --
+but checking only the deepest point per lake turned out to be incomplete:
+Michigan-Huron has its own enclosed trough elsewhere (the Manitou
+Passage, already well captured at these defaults) and several smaller,
+gentler-walled basins in Georgian Bay that these shared defaults miss
+entirely, and Ontario's own deepest point is under-refined for an
+unrelated reason (`slope_fill_radius_km` falling just short of its
+trough wall's gap). See "Algorithm Design: Topographic length-scale
+refinement" for the diagnosis and fix: a second, scale-aware refinement
+criterion run alongside the (unchanged) slope-based one above.
+
+All four basins were rerun end-to-end again with that length-scale
+criterion added (`length_scale_threshold_low_km = 1.5`,
+`length_scale_threshold_high_km = 4.0`,
+`length_scale_fill_radius_km = 3.0`; Superior and Michigan-Huron via a
+`shared`-QOS Perlmutter batch job, account `m3780`; Erie and Ontario
+interactively; all with `MPICH_GPU_SUPPORT_ENABLED=0`):
+
+- **Michigan-Huron**: 33,884 -> 45,488 cells (+34.2% over the baseline
+  above); the Georgian Bay pockets' bias falls from 24.3 m/5.4 m to
+  2.8 m/2.2 m.
+- **Ontario**: 5,632 -> 6,992 cells (+24.2%); deepest-point bias falls
+  from 18.2 m to 5.7 m (-225.7 m to about -238.2 m, vs. -243.9 m truth).
+- **Superior**: 23,433 -> 30,759 cells (+31.3%); deepest cell goes from
+  -401.2 m to -401.4 m, essentially unchanged (truth -405.1 m) -- no
+  regression, just added cost from sharing the same config as the lakes
+  that need it.
+- **Erie**: 6,936 -> 7,759 cells (+11.9%); its bathymetry has no real
+  trough to fix, so this is pure added cost with no accuracy benefit --
+  the accepted trade-off for keeping one config shared by all four
+  basins rather than special-casing the three that need it.
+
+See "Algorithm Design: Topographic length-scale refinement" for the full
+derivation.

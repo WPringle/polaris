@@ -102,6 +102,26 @@ slope_transition_exponent = 1.0
 # crosses slope_threshold_high
 slope_fill_radius_km = 2.0
 
+# resolution, km, applied wherever the topographic length scale (see
+# length_scale_threshold_low_km below) drops to length_scale_threshold_low_km
+# or less. Matches coastal_resolution_km/slope_resolution_km by default
+length_scale_resolution_km = 0.8125
+
+# bathymetric length scale L = he / |grad(H)| (he = harmonic-mean depth of
+# two neighboring points, a scale-aware alternative to a raw slope value)
+# at/below which length_scale_resolution_km fully applies
+length_scale_threshold_low_km = 1.5
+
+# length scale above which no length-scale-based refinement is applied
+length_scale_threshold_high_km = 4.0
+
+# exponent of the length-scale blend; 1.0 is a linear ramp
+length_scale_transition_exponent = 1.0
+
+# radius, km, of the morphological closing applied to the short-length-
+# scale mask, analogous to slope_fill_radius_km above
+length_scale_fill_radius_km = 3.0
+
 # resolution, degrees, of the fine part of the graded JIGSAW sizing grid
 fine_grid_resolution_deg = 0.0025
 
@@ -111,6 +131,19 @@ coarse_grid_resolution_deg = 1.0
 # per-step growth factor between the fine region and the coarse far field
 grid_growth_factor = 1.15
 ```
+
+The `slope_threshold_*`/`slope_fill_radius_km` defaults above were
+calibrated against Lake Superior's and Lake Erie's native bathymetric
+slope distributions, and on their own miss real troughs in lakes with
+gentler overall relief (Lake Michigan-Huron's native DEM is roughly half
+as steep as Superior's/Erie's at every percentile). Rather than
+overriding the slope options per lake, the `length_scale_*` options above
+add a second, scale-aware refinement criterion -- a topographic length
+scale `L = he / |grad(H)|` -- that responds to *relative* depth change
+instead of a raw slope value, so one shared set of defaults works for all
+four basins without per-lake tuning. See "Algorithm Design: Topographic
+length-scale refinement" in `docs/design_docs/great_lakes_mesh.md` for
+the physical motivation and validated per-lake results.
 
 ```cfg
 # config options for preparing and remapping a single Great Lake basin's
