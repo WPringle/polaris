@@ -1,6 +1,10 @@
+import itertools
+
 import numpy as np
 import xarray as xr
 from mpas_tools.io import open_dataset, write_netcdf
+from shapely import STRtree
+from shapely.geometry import Polygon
 
 from polaris import Step
 from polaris.coriolis import add_coriolis_to_dataset
@@ -128,6 +132,8 @@ class CombineGreatLakesMesh(Step):
         ds_topos = [
             open_dataset(f'{lake_name}_topo.nc') for lake_name in lake_names
         ]
+
+        _check_no_basin_overlap(ds_meshes, lake_names)
 
         ds_combined = _merge_meshes(ds_meshes)
         ds_combined = add_coriolis_to_dataset(config, ds_combined)
@@ -281,3 +287,213 @@ def _apply_id_offsets(ds, cell_off, edge_off, vertex_off):
         values[mask] += offset
         updates[var] = (ds[var].dims, values)
     return ds.assign(updates)
+
+
+def _check_no_basin_overlap(ds_meshes, lake_names):
+    """
+    Verify that no two basins' culled meshes physically overlap.
+
+    Each basin is built independently and is assumed to be its own
+    disjoint sub-domain (see
+    :py:data:`polaris.tasks.ocean.great_lakes.lakes.GREAT_LAKES`); this
+    checks that assumption instead of just asserting it, so a shared-
+    geometry bug (e.g. two basins' bathymetry both reaching into the same
+    connecting channel, as happened at the Soo Locks) fails loudly here
+    rather than only being visible in a plot.
+
+    Parameters
+    ----------
+    ds_meshes : list of xarray.Dataset
+        Each basin's culled mesh, before ID offsetting
+
+    lake_names : list of str
+        The basin names, in the same order as ``ds_meshes``
+
+    Raises
+    ------
+    ValueError
+        If any two basins have cells that physically overlap
+    """
+    bounds = [_lon_lat_bounds(ds) for ds in ds_meshes]
+    for i, j in itertools.combinations(range(len(ds_meshes)), 2):
+        if not _bounds_intersect(bounds[i], bounds[j]):
+            continue
+        overlap = _overlapping_cells(
+            ds_meshes[i], ds_meshes[j], bounds[i], bounds[j]
+        )
+        if overlap is not None:
+            lon_min, lon_max, lat_min, lat_max = overlap['extent']
+            raise ValueError(
+                f'{lake_names[i]} and {lake_names[j]} have '
+                f'{overlap["n_pairs"]} overlapping cell pairs '
+                f'({overlap["n_i"]} {lake_names[i]} cells, '
+                f'{overlap["n_j"]} {lake_names[j]} cells) spanning lon '
+                f'[{lon_min:.4f}, {lon_max:.4f}], lat '
+                f'[{lat_min:.4f}, {lat_max:.4f}]. Each basin is expected '
+                f'to be its own disjoint sub-domain; add or adjust a '
+                f'bathymetry clip/exclusion in [great_lakes_topo] to '
+                f'separate them (see '
+                f'docs/design_docs/great_lakes_mesh.md).'
+            )
+
+
+def _lon_lat_bounds(ds):
+    """
+    The (lon_min, lon_max, lat_min, lat_max) bounding box of a mesh's
+    cell *polygons*, in degrees with longitude wrapped to ``[-180, 180)``.
+
+    Uses vertex coordinates, not cell centers: a boundary cell's polygon
+    can extend past its own center by roughly a cell width, which is
+    exactly the scale at which two independently built basins can
+    overlap, so a center-based bounding box could miss the very overlap
+    this check exists to catch.
+    """
+    lon_deg = np.rad2deg(ds['lonVertex'].values)
+    lon_deg = np.where(lon_deg > 180.0, lon_deg - 360.0, lon_deg)
+    lat_deg = np.rad2deg(ds['latVertex'].values)
+    return (
+        float(lon_deg.min()),
+        float(lon_deg.max()),
+        float(lat_deg.min()),
+        float(lat_deg.max()),
+    )
+
+
+def _bounds_intersect(bounds_a, bounds_b):
+    """Whether two (lon_min, lon_max, lat_min, lat_max) boxes intersect"""
+    a_lon_min, a_lon_max, a_lat_min, a_lat_max = bounds_a
+    b_lon_min, b_lon_max, b_lat_min, b_lat_max = bounds_b
+    return (
+        a_lon_min <= b_lon_max
+        and b_lon_min <= a_lon_max
+        and a_lat_min <= b_lat_max
+        and b_lat_min <= a_lat_max
+    )
+
+
+def _cell_polygons_in_box(ds, extent):
+    """
+    Build shapely polygons for the cells of ``ds`` whose own vertex
+    bounding box intersects ``extent``.
+
+    Selecting by each cell's own geometry, not its center, matters here:
+    a boundary cell's polygon can extend past its center by roughly a
+    cell width, which is exactly the scale of the overlap this check
+    exists to catch, so a center-based filter could silently drop the
+    one cell that actually overlaps.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        A basin's culled mesh
+
+    extent : tuple of float
+        The (lon_min, lon_max, lat_min, lat_max) box, in degrees
+
+    Returns
+    -------
+    cell_indices : numpy.ndarray
+        The indices of the selected cells
+
+    polygons : list of shapely.geometry.Polygon
+        One polygon per selected cell, in the same order as
+        ``cell_indices``
+    """
+    lon_min, lon_max, lat_min, lat_max = extent
+    lon_vertex = np.rad2deg(ds['lonVertex'].values)
+    lon_vertex = np.where(lon_vertex > 180.0, lon_vertex - 360.0, lon_vertex)
+    lat_vertex = np.rad2deg(ds['latVertex'].values)
+    vertices_on_cell = ds['verticesOnCell'].values
+    n_edges_on_cell = ds['nEdgesOnCell'].values
+    max_edges = vertices_on_cell.shape[1]
+
+    # verticesOnCell is one-based and zero-padded out to maxEdges, so the
+    # padding is masked off (rather than indexed) before reducing
+    valid = np.arange(max_edges)[None, :] < n_edges_on_cell[:, None]
+    indices = np.where(valid, vertices_on_cell - 1, 0)
+    cell_lon = lon_vertex[indices]
+    cell_lat = lat_vertex[indices]
+    cell_lon_min = np.where(valid, cell_lon, np.inf).min(axis=1)
+    cell_lon_max = np.where(valid, cell_lon, -np.inf).max(axis=1)
+    cell_lat_min = np.where(valid, cell_lat, np.inf).min(axis=1)
+    cell_lat_max = np.where(valid, cell_lat, -np.inf).max(axis=1)
+
+    mask = (
+        (cell_lon_max >= lon_min)
+        & (cell_lon_min <= lon_max)
+        & (cell_lat_max >= lat_min)
+        & (cell_lat_min <= lat_max)
+    )
+    cell_indices = np.flatnonzero(mask)
+
+    polygons = []
+    for cell_index in cell_indices:
+        n = n_edges_on_cell[cell_index]
+        vertex_indices = vertices_on_cell[cell_index, :n] - 1
+        points = zip(
+            lon_vertex[vertex_indices],
+            lat_vertex[vertex_indices],
+            strict=True,
+        )
+        polygons.append(Polygon(points))
+    return cell_indices, polygons
+
+
+def _overlapping_cells(ds_i, ds_j, bounds_i, bounds_j):
+    """
+    Find cells of two basins' meshes whose polygons physically overlap,
+    restricted to the intersection of their bounding boxes.
+
+    Parameters
+    ----------
+    ds_i, ds_j : xarray.Dataset
+        Two basins' culled meshes
+
+    bounds_i, bounds_j : tuple of float
+        Each basin's (lon_min, lon_max, lat_min, lat_max) bounding box
+
+    Returns
+    -------
+    overlap : dict or None
+        ``None`` if no cells overlap, otherwise a dict with ``n_pairs``,
+        ``n_i``, and ``n_j`` (numbers of overlapping cell pairs/cells) and
+        ``extent`` (the (lon_min, lon_max, lat_min, lat_max) of the
+        overlapping region)
+    """
+    extent = (
+        max(bounds_i[0], bounds_j[0]),
+        min(bounds_i[1], bounds_j[1]),
+        max(bounds_i[2], bounds_j[2]),
+        min(bounds_i[3], bounds_j[3]),
+    )
+    cell_indices_i, polygons_i = _cell_polygons_in_box(ds_i, extent)
+    cell_indices_j, polygons_j = _cell_polygons_in_box(ds_j, extent)
+    if len(polygons_i) == 0 or len(polygons_j) == 0:
+        return None
+
+    tree = STRtree(polygons_j)
+    cells_i = set()
+    cells_j = set()
+    n_pairs = 0
+    lon_min, lon_max, lat_min, lat_max = (1.0e9, -1.0e9, 1.0e9, -1.0e9)
+    for local_i, polygon_i in enumerate(polygons_i):
+        for local_j in tree.query(polygon_i, predicate='intersects'):
+            overlap_area = polygon_i.intersection(polygons_j[local_j]).area
+            if overlap_area > 0.0:
+                n_pairs += 1
+                cells_i.add(cell_indices_i[local_i])
+                cells_j.add(cell_indices_j[local_j])
+                bounds = polygon_i.intersection(polygons_j[local_j]).bounds
+                lon_min = min(lon_min, bounds[0])
+                lat_min = min(lat_min, bounds[1])
+                lon_max = max(lon_max, bounds[2])
+                lat_max = max(lat_max, bounds[3])
+
+    if n_pairs == 0:
+        return None
+    return {
+        'n_pairs': n_pairs,
+        'n_i': len(cells_i),
+        'n_j': len(cells_j),
+        'extent': (lon_min, lon_max, lat_min, lat_max),
+    }

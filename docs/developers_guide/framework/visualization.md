@@ -200,6 +200,12 @@ and {py:class}`matplotlib.colors.LogNorm`, respectively.
 The config option `colorbar_ticks` (if it is defined) specifies tick locations
 along the colorbar. If it is not specified, they are determined automatically.
 
+The config option `colormap_levels` (if it is defined) resamples the
+colormap to that many discrete colors, giving banded rather than
+continuous shading. It is applied before `under_color`/`over_color`, so
+those still apply to values outside `norm_args`' `vmin`/`vmax` rather than
+to one of the bands.
+
 ### plotting from lat/lon grids
 
 You can use {py:func}`polaris.viz.plot_global_lat_lon_field()` to plot a field 

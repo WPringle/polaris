@@ -9,10 +9,12 @@ mismatch is what ``mpas_tools.merge_grids.merge_grids`` cannot handle.
 """
 
 import numpy as np
+import pytest
 import xarray as xr
 
 from polaris.tasks.ocean.great_lakes.combine import (
     _apply_id_offsets,
+    _check_no_basin_overlap,
     _merge_meshes,
     _pad_ragged_dims,
 )
@@ -237,3 +239,52 @@ def test_merge_meshes_counts_equal_sum_of_inputs():
     assert ds_combined.sizes['nCells'] == 10
     assert ds_combined.sizes['nEdges'] == 13
     assert ds_combined.sizes['nVertices'] == 9
+
+
+# ---------------------------------------------------------------------------
+# _check_no_basin_overlap
+# ---------------------------------------------------------------------------
+
+
+def _make_square_cell_mesh(lon_deg, lat_deg):
+    """
+    A one-cell basin mesh whose single cell is the quadrilateral with the
+    given vertex (lon, lat) corners, in degrees, listed in order around
+    the polygon.
+    """
+    lon_rad = np.deg2rad(np.asarray(lon_deg))
+    lat_rad = np.deg2rad(np.asarray(lat_deg))
+    ds = xr.Dataset()
+    ds['lonVertex'] = ('nVertices', lon_rad)
+    ds['latVertex'] = ('nVertices', lat_rad)
+    ds['lonCell'] = ('nCells', np.array([lon_rad.mean()]))
+    ds['latCell'] = ('nCells', np.array([lat_rad.mean()]))
+    ds['nEdgesOnCell'] = ('nCells', np.array([4], dtype=np.int32))
+    ds['verticesOnCell'] = (
+        ('nCells', 'maxEdges'),
+        np.array([[1, 2, 3, 4]], dtype=np.int32),
+    )
+    return ds
+
+
+def test_check_no_basin_overlap_passes_for_disjoint_basins():
+    ds_a = _make_square_cell_mesh([0.0, 1.0, 1.0, 0.0], [0.0, 0.0, 1.0, 1.0])
+    ds_b = _make_square_cell_mesh(
+        [10.0, 11.0, 11.0, 10.0], [10.0, 10.0, 11.0, 11.0]
+    )
+    # should not raise
+    _check_no_basin_overlap([ds_a, ds_b], ['a', 'b'])
+
+
+def test_check_no_basin_overlap_passes_for_touching_basins():
+    # sharing an edge (touching, zero-area intersection) is not an overlap
+    ds_a = _make_square_cell_mesh([0.0, 1.0, 1.0, 0.0], [0.0, 0.0, 1.0, 1.0])
+    ds_b = _make_square_cell_mesh([1.0, 2.0, 2.0, 1.0], [0.0, 0.0, 1.0, 1.0])
+    _check_no_basin_overlap([ds_a, ds_b], ['a', 'b'])
+
+
+def test_check_no_basin_overlap_raises_for_overlapping_basins():
+    ds_a = _make_square_cell_mesh([0.0, 1.0, 1.0, 0.0], [0.0, 0.0, 1.0, 1.0])
+    ds_b = _make_square_cell_mesh([0.5, 1.5, 1.5, 0.5], [0.5, 0.5, 1.5, 1.5])
+    with pytest.raises(ValueError, match='overlapping cell pairs'):
+        _check_no_basin_overlap([ds_a, ds_b], ['a', 'b'])

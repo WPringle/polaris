@@ -299,6 +299,9 @@
    lakes.GREAT_LAKES
 
    task.GreatLakesMeshTask
+   task.GreatLakesCombinedMeshTask
+   task.GreatLakesCombinedInitTask
+   task.GreatLakesCombinedForwardTask
 
    mesh.spherical.GreatLakesSphericalMesh
 
@@ -309,6 +312,15 @@
    topo.remap.GreatLakesTopoRemap
 
    cull.GreatLakesCullMesh
+
+   combine.CombineGreatLakesMesh
+
+   init.Init
+
+   forward.Forward
+
+   viz.VizCombinedGreatLakesMesh
+   viz.VizCombinedGreatLakesMesh.run
 ```
 
 ### horiz_press_grad

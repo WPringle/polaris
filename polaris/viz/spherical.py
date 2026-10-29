@@ -417,6 +417,11 @@ def setup_colormap(config, colormap_section):
 
         It may also include:
 
+        colormap_levels
+            The number of discrete colors to resample the colormap to,
+            giving banded rather than continuous shading. Applied before
+            ``under_color``/``over_color``.
+
         colorbar_ticks
             An array of values where ticks should be placed
 
@@ -435,6 +440,9 @@ def setup_colormap(config, colormap_section):
     colormap = colormaps[config.get(colormap_section, 'colormap_name')]
 
     section = config[colormap_section]
+
+    if section.has_option('colormap_levels'):
+        colormap = colormap.resampled(section.getint('colormap_levels'))
 
     norm_type = section.get('norm_type')
 

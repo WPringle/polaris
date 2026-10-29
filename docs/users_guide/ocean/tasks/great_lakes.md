@@ -167,6 +167,21 @@ bathymetry_filenames = <<<missing>>>
 # `docs/design_docs/great_lakes_mesh.md`.
 lon_max_deg =
 
+# excludes a rectangular corner of the basin's bathymetry: source pixels
+# with longitude < exclude_lon_max_deg AND latitude > exclude_lat_min_deg
+# are set to land. Unlike lon_max_deg (which clips the whole grid at one
+# longitude across every latitude), this only removes a corner, so it can
+# isolate a connecting-channel approach that doesn't span the basin's
+# full latitude range. Both must be set together; blank means no
+# exclusion. Set to -83.96/46.28 for `michigan_huron` only, to exclude
+# Huron's side of the same Soo Locks approach Superior's `lon_max_deg`
+# excludes -- the two basins' independently built meshes were found to
+# physically overlap there otherwise; see "Decision: Lake Huron's domain
+# stops short of the Soo Locks too" in
+# `docs/design_docs/great_lakes_mesh.md`.
+exclude_lon_max_deg =
+exclude_lat_min_deg =
+
 # variable names in the source file(s)
 elevation_var = z
 lon_var = x
@@ -216,6 +231,33 @@ basins (each remains its own closed sub-domain, as it already was). See
 `docs/design_docs/great_lakes_mesh.md` for why this is correct rather
 than a simplification.
 
+### visualization
+
+The `viz` step plots the combined mesh: full-domain cell width and
+bathymetry (filled, with no cell outlines), plus three zoomed-in views
+with crisp, individually visible cell outlines at the Soo Locks, the
+Straits of Mackinac, and Georgian Bay -- the three places where the
+combined mesh's construction is easiest to check by eye. Outlines are not
+drawn on the full-domain plots: at 89,691 cells over the combined domain,
+outlines at that scale blend into a solid wash rather than showing
+individual cells. `debug_summary.txt` records scalar diagnostics, including
+each zoomed view's span-to-median-cell-width ratio as a legibility check.
+
+```{image} images/great_lakes_combined_cell_width.png
+:align: center
+:width: 500px
+```
+
+```{image} images/great_lakes_combined_bathymetry.png
+:align: center
+:width: 500px
+```
+
+```{image} images/great_lakes_combined_mesh_outline_georgian_bay.png
+:align: center
+:width: 500px
+```
+
 ### config options
 
 ```cfg
@@ -224,6 +266,37 @@ than a simplification.
 
 # Coriolis type for the merged mesh
 type = spherical
+
+
+# config options for visualizing the combined Great Lakes mesh
+[great_lakes_combined_viz]
+
+# the (lon_min, lon_max, lat_min, lat_max) extent, degrees, of the
+# full-domain plots -- the union of the four basins' extents
+extent = -92.4, -75.8, 41.2, 49.7
+
+
+# colormap for the combined mesh's cell width.  Banded rather than
+# continuous (12 steps of 0.25 km over the 0.5-3.5 km range below) so the
+# coastal, slope, and interior resolution bands read as distinct bands
+[viz_combined_cell_width]
+colormap_name = viridis
+colormap_levels = 12
+norm_type = linear
+norm_args = {'vmin': 0.5, 'vmax': 3.5}
+colorbar_ticks = 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5
+under_color = black
+over_color = yellow
+
+
+# colormap for the remapped bathymetry.  vmin is just below the combined
+# mesh's deepest cell (about -401 m, in Lake Superior)
+[viz_combined_bathymetry]
+colormap_name = cmo.deep_r
+norm_type = linear
+norm_args = {'vmin': -410.0, 'vmax': 0.0}
+under_color = black
+over_color = tan
 ```
 
 (ocean-great-lakes-combined-init)=

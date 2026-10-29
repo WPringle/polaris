@@ -659,6 +659,64 @@ effect on Superior's known trough or deepest point (see "Testing and
 Validation: End-to-end mesh"), only a small reduction in domain size and
 cell count.
 
+### Decision: Lake Huron's domain stops short of the Soo Locks too
+
+Date last modified: 2026/10/29
+
+The decision above assumed "the other lakes' DEMs don't reach [their
+control points] at all" -- true for Erie and Ontario, but not for
+Michigan-Huron. While building `VizCombinedGreatLakesMesh`'s cell-width
+plot, two basins that are supposed to be disjoint sub-domains (see
+"Decision: Four independent basins otherwise") appeared visually
+connected near Sault Ste. Marie. Direct analysis of the built
+`combined_mesh.nc`, using each basin's actual cell polygons
+(`verticesOnCell`/vertex coordinates) rather than just cell centers,
+confirmed a real geometric overlap: 4 pairs of cells physically
+overlapped (3 Superior cells, 2 Michigan-Huron cells), ~1.26 km^2 total,
+confined to lon [-84.348, -84.329], lat [46.492, 46.508] -- right at
+Superior's `lon_max_deg` cutoff. Huron's own downloaded DEM (the Huron
+side, near the North Channel/St. Marys River mouth toward De Tour
+Village) reaches into the same lock-controlled corridor Superior's does,
+and its independently built mesh was never clipped to exclude it.
+
+Unlike Superior's corridor, which spans its own full relevant latitude
+range (so a plain `lon_max_deg` whole-grid clip is correct), Huron has
+legitimate open-lake water -- the North Channel and Georgian Bay -- west
+of Superior's cutoff longitude at lower latitudes. A whole-column clip
+would remove that too, so `PrepareBathymetryStep` gained a second,
+narrower mechanism: `exclude_lon_max_deg`/`exclude_lat_min_deg` in
+`[great_lakes_topo]` (both blank/unset by default), which together mask
+only a rectangular corner (`lon < exclude_lon_max_deg` AND
+`lat > exclude_lat_min_deg`) to land via `.where()`, rather than dropping
+whole rows/columns via `.sel()`. `GreatLakesMeshTask` sets
+`exclude_lon_max_deg = -83.96` and `exclude_lat_min_deg = 46.28` only for
+`lake_name == 'michigan_huron'`, via a `_MICHIGAN_HURON_NOTCH_EXCLUSION`
+dict in `task.py`, mirroring `_LON_MAX_DEG_OVERRIDES`.
+
+Checked directly against the real bathymetry: this exclusion removes
+171,336 of 46,551,841 native wet pixels (0.37%). Depths in the excluded
+corner are -8.7 to -0.3 m (median -3.8 m) -- shallow and river-like,
+consistent with the lock-approach corridor rather than open lake, and
+cells just south of the latitude cutoff have the same shallow profile,
+confirming the cut falls within one homogeneous shallow feature rather
+than across a lake/channel boundary. Rebuilding Michigan-Huron end to end
+with the exclusion applied changes its culled-mesh cell count from 45,488
+to 45,158 (-330 cells, -0.7%); the combined mesh (see "Algorithm Design:
+Mesh merging") goes from 90,021 to 89,691 cells. `[great_lakes_forward]`'s
+`approx_cell_count` was updated to match.
+
+`CombineGreatLakesMesh` also gained `_check_no_basin_overlap`, run before
+merging: for any two basins whose vertex-based bounding boxes intersect,
+it builds real cell polygons and checks for true intersection with a
+`shapely.STRtree`, raising a clear error naming the basins and
+overlapping extent if any are found. The bounding-box pre-filter itself
+had to use vertex coordinates rather than cell centers -- a first
+implementation using `lonCell`/`latCell` bounds missed this overlap
+entirely in a unit test, since a boundary cell's polygon can extend past
+its own center by roughly a cell width, exactly the scale at which this
+overlap occurred. Rerunning the check against the rebuilt meshes confirms
+no overlap remains between any pair of basins.
+
 ### Decision: No per-lake water-level datum handling
 
 NOAA's "lld" grids already have each lake's own IGLD85 water-level datum

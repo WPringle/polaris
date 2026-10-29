@@ -27,7 +27,19 @@ graph:
    grid sized to the union of their extents -- see the design doc's
    "Merging Michigan and Huron's bathymetry" section. Every step after
    this one is basin-agnostic and needed no changes to support a
-   multi-source basin.
+   multi-source basin. Two clipping mechanisms remove bathymetry that
+   isn't part of the open lake: `lon_max_deg` drops whole longitude
+   columns across every latitude (used for Superior's Soo Locks
+   approach, which spans its own full relevant latitude range), while
+   `exclude_lon_max_deg`/`exclude_lat_min_deg` mask only a rectangular
+   corner via `.where()` rather than `.sel()` (used for Huron's side of
+   the same corridor, since Huron has legitimate open-lake water --
+   North Channel/Georgian Bay -- west of that longitude at lower
+   latitudes, which a whole-column clip would also remove). The
+   corner exclusion was added after the combined mesh's two
+   independently built basins were found to physically overlap right at
+   the Soo Locks; see the design doc's "Decision: Lake Huron's domain
+   stops short of the Soo Locks too" section.
 2. {py:class}`polaris.tasks.ocean.great_lakes.mesh.spherical.GreatLakesSphericalMesh`,
    a {py:class}`polaris.mesh.spherical.QuasiUniformSphericalMeshStep`
    subclass, builds the cell-width field. See
@@ -97,7 +109,17 @@ as attributes for exactly this purpose:
    into `combined_mesh.nc`/`combined_topography.nc` (`_merge_meshes`,
    `_pad_ragged_dims`, `_apply_id_offsets`; see the design doc's "Mesh
    merging" section for why `mpas_tools.merge_grids.merge_grids()` isn't
-   called directly), regenerates `combined_graph.info` via
+   called directly). Before merging, `_check_no_basin_overlap` verifies
+   the disjoint-sub-domain assumption each basin's docstring asserts,
+   rather than just trusting it: for any two basins whose bounding boxes
+   intersect (built from vertex, not cell-center, coordinates, since a
+   boundary cell's polygon can extend past its own center by roughly a
+   cell width -- exactly the scale of the Soo Locks overlap this check
+   was added to catch), it builds real cell polygons from
+   `verticesOnCell` and checks for true intersection with a
+   `shapely.STRtree`, raising a `ValueError` naming the basins and
+   overlapping extent if any are found. `CombineGreatLakesMesh.run()`
+   then regenerates `combined_graph.info` via
    {py:func}`polaris.model_step.make_graph_file`, adds the Coriolis
    parameter via {py:func}`polaris.coriolis.add_coriolis_to_dataset`, and
    writes `reconstruction_weights.nc` and `combined_mesh.scrip.nc` via
@@ -106,7 +128,25 @@ as attributes for exactly this purpose:
    out of {py:class}`polaris.tasks.e3sm.init.topo.cull.cull.CullMeshStep`,
    which now calls it too). It also adds a `basinIndex` field and a
    `basin_names` global attribute to `combined_topography.nc`, so the init
-   step below can assign a per-basin background salinity.
+   step below can assign a per-basin background salinity. The task's
+   second step, {py:class}`polaris.tasks.ocean.great_lakes.viz.VizCombinedGreatLakesMesh`,
+   plots the merged mesh's cell width (mean of `dcEdge` over each cell's
+   edges via `_cell_width_km`, not the `areaCell`-based hexagon estimate
+   used elsewhere, since that estimate assumes a regular hexagon and
+   understates width on the clipped coastal cells this plot exists to
+   show) and bathymetry, with no cell outlines drawn on either. A
+   full-domain outline plot isn't produced: at 90,021 cells, ink from the
+   outlines would dominate the small coastal cells and wash into a solid
+   color at any dpi, since the stroke width and cell size both scale with
+   it. Instead, `MESH_OUTLINE_ZOOMS` draws three small boxes (the Soo
+   Locks truncation, the Michigan/Huron bathymetry seam at the Straits of
+   Mackinac, and the topographic-length-scale-refined troughs in Georgian
+   Bay) with fully legible per-cell outlines, each one chosen to show a
+   feature specific to how the combined mesh was built (see
+   `docs/design_docs/great_lakes_mesh.md`). `debug_summary.txt` records
+   each zoom's span-to-median-cell-width ratio so future boxes can be
+   checked against the same rule of thumb that ruled out a full-domain
+   version.
 2. {py:class}`polaris.tasks.ocean.great_lakes.task.GreatLakesCombinedInitTask`
    (`ocean/spherical/great_lakes/combined/init`) runs
    {py:class}`polaris.tasks.ocean.great_lakes.init.Init`
@@ -140,6 +180,15 @@ as attributes for exactly this purpose:
    combined mesh's own finest edge and vertical grid (see the design
    doc), and `update_eos=True` is passed to `super().__init__` so
    `[ocean] eos_type` also governs the run's `EosType`/`config_eos_type`.
+   `forward.yaml`'s `Omega.IOStreams.InitialVertCoord.Filename` must be
+   `vert_coord.nc`, matching `single_column`'s pattern (not
+   `realistic_global`'s `init.nc`, which only works there because that
+   task's `init.nc` holds the vertical-coordinate fields too): this task
+   writes them to a separate `vert_coord.nc`
+   ({py:class}`polaris.tasks.ocean.great_lakes.init.Init`), and pointing
+   `InitialVertCoord` at `init.nc` instead crashed Omega with `Error
+   reading BottomGeomDepth from InitialVertCoord` before any time steps
+   ran.
 
 Each of these three tasks builds its own
 {py:class}`~polaris.config.PolarisConfigParser` (`great_lakes_combined.cfg`,

@@ -99,6 +99,28 @@ class PrepareBathymetryStep(Step):
                 f'of {n_before} longitude columns'
             )
 
+        exclude_lon_raw = (
+            section.get('exclude_lon_max_deg', fallback='') or ''
+        ).strip()
+        exclude_lat_raw = (
+            section.get('exclude_lat_min_deg', fallback='') or ''
+        ).strip()
+        if exclude_lon_raw and exclude_lat_raw:
+            exclude_lon_max_deg = float(exclude_lon_raw)
+            exclude_lat_min_deg = float(exclude_lat_raw)
+            notch = (ds['lon'] < exclude_lon_max_deg) & (
+                ds['lat'] > exclude_lat_min_deg
+            )
+            n_before = int(np.isfinite(ds['elevation'].values).sum())
+            ds['elevation'] = ds['elevation'].where(~notch)
+            n_after = int(np.isfinite(ds['elevation'].values).sum())
+            logger.info(
+                f'Excluding {self.lake_name} bathymetry corner lon < '
+                f'{exclude_lon_max_deg} deg and lat > '
+                f'{exclude_lat_min_deg} deg: removed {n_before - n_after} '
+                f'of {n_before} wet source pixels'
+            )
+
         # pyremap's LatLonGridDescriptor requires CF-compliant units on
         # the coordinate variables; GMT grids don't set them
         ds.lon.attrs['units'] = 'degrees_east'

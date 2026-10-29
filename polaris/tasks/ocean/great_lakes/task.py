@@ -14,12 +14,23 @@ from polaris.tasks.ocean.great_lakes.topo import (
     PrepareBathymetryStep,
     WetMaskOnMeshStep,
 )
+from polaris.tasks.ocean.great_lakes.viz import VizCombinedGreatLakesMesh
 
 # Lake Superior's downloaded bathymetry extends past the Soo Locks at
 # Sault Ste. Marie into the St. Marys River approach/Whitefish Bay, water
 # whose level is hydraulically controlled by the locks rather than part of
 # the open lake -- see docs/design_docs/great_lakes_mesh.md.
 _LON_MAX_DEG_OVERRIDES = {'superior': -84.34}
+
+# Lake Huron's downloaded bathymetry extends into the same St. Marys
+# River/Soo Locks approach Superior's DEM does, and the two basins'
+# independently built meshes were found to physically overlap there. This
+# corner exclusion removes Huron's side of the same lock-controlled
+# corridor -- see docs/design_docs/great_lakes_mesh.md.
+_MICHIGAN_HURON_NOTCH_EXCLUSION = {
+    'exclude_lon_max_deg': -83.96,
+    'exclude_lat_min_deg': 46.28,
+}
 
 
 class GreatLakesMeshTask(Task):
@@ -86,6 +97,9 @@ class GreatLakesMeshTask(Task):
                 'lon_max_deg',
                 str(_LON_MAX_DEG_OVERRIDES[lake_name]),
             )
+        if lake_name == 'michigan_huron':
+            for option, value in _MICHIGAN_HURON_NOTCH_EXCLUSION.items():
+                config.set('great_lakes_topo', option, str(value))
         self.set_shared_config(config, link='great_lakes_mesh.cfg')
 
         bathymetry_step = PrepareBathymetryStep(
@@ -222,6 +236,14 @@ class GreatLakesCombinedMeshTask(Task):
         )
         self.add_step(combine_step)
         self.combine_step = combine_step
+
+        viz_step = VizCombinedGreatLakesMesh(
+            component=component,
+            subdir=os.path.join(subdir, 'viz'),
+            config=config,
+            combine_step=combine_step,
+        )
+        self.add_step(viz_step)
 
 
 class GreatLakesCombinedInitTask(Task):
