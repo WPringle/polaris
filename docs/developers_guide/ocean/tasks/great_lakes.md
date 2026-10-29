@@ -82,7 +82,76 @@ built from `great_lakes_mesh.cfg` and `great_lakes_topo.cfg` in
 {py:mod}`polaris.tasks.ocean.great_lakes`, plus `polaris.mesh.spherical`'s
 `spherical.cfg` and `polaris.remap`'s `mapping.cfg`.
 
+## Combined mesh, init, and forward tasks
+
+{py:func}`polaris.tasks.ocean.great_lakes.add_great_lakes_tasks` also
+registers three tasks that depend on all four basins'
+{py:class}`~polaris.tasks.ocean.great_lakes.task.GreatLakesMeshTask`
+instances, which expose their `cull_mesh` and `topo_remap_culled` steps
+as attributes for exactly this purpose:
+
+1. {py:class}`polaris.tasks.ocean.great_lakes.task.GreatLakesCombinedMeshTask`
+   (`ocean/spherical/great_lakes/combined/mesh`) runs
+   {py:class}`polaris.tasks.ocean.great_lakes.combine.CombineGreatLakesMesh`,
+   which merges the four basins' `culled_mesh.nc`/`topography_remapped.nc`
+   into `combined_mesh.nc`/`combined_topography.nc` (`_merge_meshes`,
+   `_pad_ragged_dims`, `_apply_id_offsets`; see the design doc's "Mesh
+   merging" section for why `mpas_tools.merge_grids.merge_grids()` isn't
+   called directly), regenerates `combined_graph.info` via
+   {py:func}`polaris.model_step.make_graph_file`, adds the Coriolis
+   parameter via {py:func}`polaris.coriolis.add_coriolis_to_dataset`, and
+   writes `reconstruction_weights.nc` and `combined_mesh.scrip.nc` via
+   {py:func}`polaris.mesh.reconstruct.compute_reconstruction_weights` and
+   the new {py:func}`polaris.mesh.scrip.write_mpas_scrip_file` (factored
+   out of {py:class}`polaris.tasks.e3sm.init.topo.cull.cull.CullMeshStep`,
+   which now calls it too). It also adds a `basinIndex` field and a
+   `basin_names` global attribute to `combined_topography.nc`, so the init
+   step below can assign a per-basin background salinity.
+2. {py:class}`polaris.tasks.ocean.great_lakes.task.GreatLakesCombinedInitTask`
+   (`ocean/spherical/great_lakes/combined/init`) runs
+   {py:class}`polaris.tasks.ocean.great_lakes.init.Init`
+   ({py:class}`~polaris.ocean.model.OceanIOStep`, following
+   {py:class}`polaris.tasks.ocean.realistic_global.init.initial_state.InitialStateStep`'s
+   pattern most closely of any existing step): clamps `bottomDepth` to
+   `min_bottom_depth` (`_bottom_depth_from_elevation`), calls
+   {py:func}`polaris.ocean.vertical.init_vertical_coord`, builds the
+   idealized temperature profile (`_idealized_temperature`) and per-basin
+   salinity (`_salinity_by_basin`, keyed by `basinIndex`), and adds zero
+   velocity via
+   {py:func}`polaris.ocean.init_state.add_quiescent_normal_velocity`
+   before writing `mesh.nc`/`vert_coord.nc`/`init.nc`. T/S must be set on
+   the dataset before `write_vert_coord_dataset`:
+   {py:func}`polaris.ocean.vertical.diagnostics.pseudothickness_from_ds`
+   silently returns `None` without them, which would leave
+   `RefPseudoThickness` missing.
+3. {py:class}`polaris.tasks.ocean.great_lakes.task.GreatLakesCombinedForwardTask`
+   (`ocean/spherical/great_lakes/combined/forward`) runs
+   {py:class}`polaris.tasks.ocean.great_lakes.forward.Forward`
+   ({py:class}`~polaris.ocean.model.OceanModelStep`, following
+   {py:class}`polaris.tasks.ocean.single_column.forward.Forward`'s
+   pattern of reading the upstream step's local
+   `mesh.nc`/`vert_coord.nc`/`init.nc` directly, rather than
+   `realistic_global`'s shared-mesh-database mechanism, since there is
+   only the one combined mesh). `compute_cell_count()` returns a plain
+   `[great_lakes_forward] approx_cell_count` rather than a resolution
+   formula, since the combined mesh is fixed, not a family of
+   resolutions. `dynamic_model_config` templates `forward.yaml` with
+   `btr_dt`/`dt_btr_ratio`/`del2`/`del4` derived directly against the
+   combined mesh's own finest edge and vertical grid (see the design
+   doc), and `update_eos=True` is passed to `super().__init__` so
+   `[ocean] eos_type` also governs the run's `EosType`/`config_eos_type`.
+
+Each of these three tasks builds its own
+{py:class}`~polaris.config.PolarisConfigParser` (`great_lakes_combined.cfg`,
+`great_lakes_init.cfg`, `great_lakes_forward.cfg` respectively, all in
+{py:mod}`polaris.tasks.ocean.great_lakes`) rather than sharing the
+per-basin mesh tasks' config, since none of their options are per-basin.
+`GreatLakesCombinedForwardTask` also loads `great_lakes_init.cfg` for its
+`[ocean] eos_type`, which must match the one the initial condition's
+tracers were written with.
+
 Not yet implemented: bathymetry for the remaining connecting channels (St.
 Marys River, St. Clair River/Lake St. Clair/Detroit River, Niagara River,
-so the four basins cannot be joined into one mesh), initial conditions,
-forcing, and a forward-run step.
+so the four basins cannot be hydraulically connected), a realistic
+temperature/salinity climatology (the initial condition above is
+idealized), and surface forcing.

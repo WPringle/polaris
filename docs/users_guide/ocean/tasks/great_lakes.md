@@ -3,8 +3,9 @@
 # Great Lakes
 
 These tasks build a regional Omega/MPAS-Ocean mesh for a Laurentian Great
-Lakes basin from a bathymetry DEM. They produce a mesh and bathymetry
-only; there is no initial condition, forcing, or forward-run step yet.
+Lakes basin from a bathymetry DEM, merge all four basins into a single
+mesh, and build an idealized initial condition and a short forward run on
+it.
 
 Each basin is built and culled as its own closed sub-domain, except for
 `michigan_huron`: Lake Michigan and Lake Huron are hydrologically a
@@ -157,6 +158,15 @@ the physical motivation and validated per-lake results.
 # Mackinac).
 bathymetry_filenames = <<<missing>>>
 
+# longitude, degrees, east of which native bathymetry is discarded before
+# meshing (keeps lon <= lon_max_deg). Blank means no clipping. Set to
+# -84.34 for `superior` only, to exclude the Whitefish Bay/St. Marys River
+# approach to the Soo Locks at Sault Ste. Marie -- water hydraulically
+# controlled by the locks, not part of the open lake; see "Decision: Lake
+# Superior's domain stops at the Soo Locks" in
+# `docs/design_docs/great_lakes_mesh.md`.
+lon_max_deg =
+
 # variable names in the source file(s)
 elevation_var = z
 lon_var = x
@@ -185,6 +195,164 @@ The number of cores is the default for `polaris.remap.MappingFileStep`
 (one task, `ntasks=1`); `coarsen_factor` keeps even the largest basin's
 coarsened bathymetry grid small enough not to need parallel remapping.
 
+(ocean-great-lakes-combined-mesh)=
+
+## combined/mesh
+
+### description
+
+`ocean/spherical/great_lakes/combined/mesh` merges all four basins'
+culled meshes into a single mesh spanning all four, and adds the Coriolis
+parameter, vector-reconstruction weights, and a SCRIP file -- all
+required before the mesh can be used as an Omega/MPAS-Ocean input, none
+of which any single basin's mesh task produces. Depends on all four
+`ocean/spherical/great_lakes/<basin>/mesh` tasks.
+
+### mesh
+
+A disjoint union of the four basins' culled meshes: cell/edge/vertex
+arrays concatenated with renumbered IDs, no connectivity created between
+basins (each remains its own closed sub-domain, as it already was). See
+`docs/design_docs/great_lakes_mesh.md` for why this is correct rather
+than a simplification.
+
+### config options
+
+```cfg
+# config options for the mesh merging the four Great Lakes basins
+[coriolis]
+
+# Coriolis type for the merged mesh
+type = spherical
+```
+
+(ocean-great-lakes-combined-init)=
+
+## combined/init
+
+### description
+
+`ocean/spherical/great_lakes/combined/init` builds a vertical grid and an
+idealized initial condition on the combined mesh. Depends on
+`ocean/spherical/great_lakes/combined/mesh`.
+
+### vertical grid
+
+A 40-level `tanh_dz` z-star grid, `bottom_depth = 420.0` m (with margin
+over the merged mesh's true ~401 m deepest point), `partial_cell_type =
+partial`. Cells shallower than `min_bottom_depth`, and cells with a
+fill-value/NaN remapped elevation, are clamped to that floor before
+`bottomDepth` is computed.
+
+### initial conditions
+
+Idealized and quiescent (zero velocity), not a climatology: uniform
+near-surface temperature, a `tanh` thermocline, and a cold bottom layer,
+with one background salinity value per basin. See
+`docs/design_docs/great_lakes_mesh.md` for why, and for the known
+shoreline artifact the depth clamp introduces.
+
+### forcing
+
+N/A -- no forcing is applied; see the `combined/forward` task below.
+
+### config options
+
+```cfg
+# config options for the idealized Great Lakes initial condition, built on
+# the combined mesh from polaris.tasks.ocean.great_lakes.combine
+
+# Options related to the ocean component
+[ocean]
+
+# Equation of state type -- teos-10 is required, not a simplification;
+# see docs/design_docs/great_lakes_mesh.md
+eos_type = teos-10
+
+[vertical_grid]
+grid_type = tanh_dz
+vert_levels = 40
+bottom_depth = 420.0
+min_layer_thickness = 1.0
+max_layer_thickness = 20.0
+coord_type = z-star
+partial_cell_type = partial
+min_pc_fraction = 0.1
+min_vert_levels = 3
+
+[great_lakes_init]
+
+# positive-down depth, m, that bottomDepth is clamped to
+min_bottom_depth = 5.0
+
+# idealized summer-stratified rest state
+surface_temperature = 20.0
+bottom_temperature = 4.0
+thermocline_depth = 15.0
+thermocline_width = 5.0
+
+# practical/absolute salinity, g/kg, one value per basin
+salinity_superior = 0.05
+salinity_michigan_huron = 0.1
+salinity_erie = 0.2
+salinity_ontario = 0.2
+```
+
+(ocean-great-lakes-combined-forward)=
+
+## combined/forward
+
+### description
+
+`ocean/spherical/great_lakes/combined/forward` runs a short Omega/
+MPAS-Ocean forward smoke test on the combined mesh and idealized initial
+condition. Depends on `ocean/spherical/great_lakes/combined/init`. This
+validates that the mesh/init pipeline actually runs; it is not a tuned or
+physically realistic simulation.
+
+### time step and run duration
+
+`btr_dt`/`dt_btr_ratio`/`del2`/`del4` are derived from the combined
+mesh's own finest edge and vertical grid, not Omega's global-mesh
+defaults (which are unconditionally unstable at this resolution); see
+`docs/design_docs/great_lakes_mesh.md`. The default run is a 6-hour smoke
+test with hourly output.
+
+### config options
+
+```cfg
+# config options for the Great Lakes combined-mesh forward smoke test
+[great_lakes_forward]
+
+# approximate number of cells in the combined mesh, used only to size the
+# number of MPI tasks
+approx_cell_count = 90998
+
+# barotropic (external-gravity-wave) time step, s
+btr_dt = 3.0
+
+# ratio of the main (baroclinic) time step to btr_dt
+dt_btr_ratio = 24
+
+# Laplacian horizontal viscosity, m^2/s
+del2 = 20.0
+
+# Biharmonic horizontal viscosity, m^4/s
+del4 = 1.0e6
+
+# whether to disable the del4 (biharmonic) term entirely
+disable_del4 = false
+
+# implicit bottom drag coefficient (dimensionless)
+bottom_drag_coeff = 1.0e-3
+
+# length of the smoke-test run
+run_duration_hours = 6
+
+# how often output is written
+output_interval_hours = 1
+```
+
 ## Example
 
 ```bash
@@ -195,3 +363,21 @@ Edit `great_lakes_erie/ocean/spherical/great_lakes/erie/mesh/great_lakes_mesh.cf
 to point `bathymetry_filenames` at your downloaded DEM(s), then run the
 task. Missing required options are reported when the task runs, after the
 work-dir config has been edited.
+
+The combined mesh, init, and forward tasks need all four basins'
+bathymetry files set up the same way:
+
+```bash
+polaris setup \
+    -t ocean/spherical/great_lakes/superior/mesh \
+       ocean/spherical/great_lakes/michigan_huron/mesh \
+       ocean/spherical/great_lakes/erie/mesh \
+       ocean/spherical/great_lakes/ontario/mesh \
+       ocean/spherical/great_lakes/combined/mesh \
+       ocean/spherical/great_lakes/combined/init \
+       ocean/spherical/great_lakes/combined/forward \
+    -w great_lakes_combined
+```
+
+Edit each basin's `great_lakes_mesh.cfg` as above, then run the tasks in
+order (each depends on the previous).

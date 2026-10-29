@@ -1,0 +1,112 @@
+ocean:
+  time_management:
+    config_stop_time: none
+    config_run_duration: {{ run_duration }}
+  time_integration:
+    config_dt: {{ dt }}
+    config_time_integrator: {{ time_integrator }}
+  split_explicit_ts:
+    config_btr_dt: {{ btr_dt }}
+  hmix_del2:
+    config_use_mom_del2: true
+    config_mom_del2: {{ del2 }}
+  hmix_del4:
+    config_use_mom_del4: {{ use_del4 }}
+    config_mom_del4: {{ del4 }}
+  bottom_drag:
+    config_bottom_drag_mode: implicit
+    config_implicit_bottom_drag_type: constant
+    config_implicit_constant_bottom_drag_coeff: {{ bottom_drag_coeff }}
+  # bottom drag must also be enabled for Omega via this debug flag (mapped
+  # to BottomDragTendency/Enable); false is already the MPAS-Ocean default
+  debug:
+    config_disable_vel_explicit_bottom_drag: false
+  advection:
+    config_horiz_tracer_adv_order: 3
+  cvmix:
+    config_use_cvmix_convection: true
+    # shear mixing is off by default in MPAS-Ocean and on by default in
+    # Omega, so set it (and its parameters) explicitly for both, matching
+    # polaris.tasks.ocean.realistic_global.forward.Forward
+    config_use_cvmix_shear: true
+    config_cvmix_shear_KPP_nu_zero: 0.005
+    config_cvmix_shear_KPP_Ri_zero: 0.7
+    config_cvmix_shear_KPP_exp: 3.0
+    config_cvmix_num_ri_smooth_loops: 2
+
+mpas-ocean:
+  cvmix:
+    config_cvmix_use_BLD_smoothing: false
+    # Omega implements only the LMD94 shear form, so there is no
+    # counterpart option to translate; MPAS-Ocean defaults to 'PP'
+    config_cvmix_shear_mixing_scheme: KPP
+  frazil_ice:
+    config_frazil_in_open_ocean: false
+  streams:
+    mesh:
+      filename_template: init.nc
+    input:
+      filename_template: init.nc
+    restart:
+      output_interval: {{ run_duration }}
+    output:
+      type: output
+      filename_template: output.nc
+      output_interval: {{ output_interval }}
+      clobber_mode: truncate
+      reference_time: 0001-01-01_00:00:00
+      contents:
+      - tracers
+      - xtime
+      - normalVelocity
+      - layerThickness
+      - kineticEnergyCell
+      - relativeVorticityCell
+
+Omega:
+  IOStreams:
+    InitialVertCoord:
+      Filename: init.nc
+    InitialState:
+      Filename: init.nc
+      Contents:
+        - State
+        - Tracers
+    History:
+      Filename: output.nc
+      Freq: {{ output_freq }}
+      FreqUnits: {{ output_freq_units }}
+      IfExists: append
+      # effectively never
+      FileFreq: 9999
+      FileFreqUnits: years
+      Contents:
+        - State
+        - AuxiliaryState
+        - Tracers
+        - PseudoThickness
+        - SshCell
+        - KineticEnergyCell
+        - Eos
+    RestartRead:
+      UsePointerFile: true
+      PointerFilename: ocn.pointer
+      Mode: read
+      Precision: double
+      Freq: 1
+      FreqUnits: OnStartup
+      UseStartEnd: false
+      Contents:
+        - Restart
+    RestartWrite:
+      UsePointerFile: true
+      PointerFilename: ocn.pointer
+      Filename: restart/ocn.restart.$Y-$M-$D_$h.$m.$s.nc
+      Mode: write
+      IfExists: replace
+      Precision: double
+      Freq: 1
+      FreqUnits: OnShutdown
+      UseStartEnd: false
+      Contents:
+        - Restart

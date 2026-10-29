@@ -25,6 +25,14 @@ their downloaded DEMs tile together exactly; the remaining basins
 (Superior, Michigan-Huron, Erie, Ontario) are not connected to each other
 or to the St. Lawrence River in this phase; see [Decisions](#decisions).
 
+A second phase merges the four basins' culled meshes into one disjoint
+mesh spanning all four, adds the Coriolis parameter and the
+vector-reconstruction weights and SCRIP file a spherical mesh needs as an
+ocean model input, and builds an idealized (quiescent, summer-stratified)
+initial condition and a short Omega/MPAS-Ocean forward run on it -- closing
+the gap this branch's own docs previously flagged ("mesh and bathymetry
+only; no initial condition, forcing, or forward-run step yet").
+
 ## Requirements
 
 ### Requirement: Mesh resolution
@@ -70,6 +78,31 @@ ocean fraction (survived culling at `min_ocean_fraction` but still
 partly land), `base_elevation` is the area-weighted average depth of the
 cell's wet portion only -- not diluted by land elevation. See "Algorithm
 Design: Topography normalization" below.
+
+### Requirement: Combined mesh
+
+Date last modified: 2026/10/28
+
+A single mesh spans all four basins, built by concatenating their culled
+meshes with renumbered IDs and no connectivity created between them (each
+basin stays a disjoint closed sub-domain, as it already is; see
+"Decision: Four independent basins otherwise" above). The combined mesh
+carries the Coriolis parameter, vector-reconstruction weights, and a
+SCRIP file, none of which any single basin's culled mesh has, but which
+`Ocean.write_horiz_mesh_dataset()` and the atm/ocean remapping that would
+consume the SCRIP file both require.
+
+### Requirement: Idealized initial condition and forward run
+
+Date last modified: 2026/10/28
+
+The combined mesh gets a vertical grid and an idealized, quiescent
+(zero-velocity) initial condition -- a summer-stratified temperature
+profile and a per-basin background salinity, not a real climatology, since
+none was available (see "Decision: Idealized rest-state initial
+condition" below) -- and a short Omega/MPAS-Ocean forward run that
+exercises this state end to end. This closes the gap the mesh-only phase
+above left open.
 
 ## Algorithm Design
 
@@ -419,6 +452,53 @@ per-event degenerate-triangle diagnostics, not a progress counter), so
 and an elapsed-time heartbeat (`remap_progress_interval_s`) during the
 run, as a liveness check rather than a true percentage.
 
+### Algorithm Design: Mesh merging
+
+Date last modified: 2026/10/28
+
+`mpas_tools.merge_grids.merge_grids()` already does almost exactly this
+-- pairwise disjoint-mesh concatenation with per-variable ID-offset
+renumbering -- and is the reference this step's offset table was taken
+from. It cannot be called as-is, though: it pads the output's `maxEdges`
+to the max of its two inputs, but then assigns each input's un-padded
+connectivity array directly into the padded output, which raises a
+shape-mismatch `ValueError` whenever the two inputs' `maxEdges` actually
+differ. That mismatch is not hypothetical here: Superior and
+Michigan-Huron's culled meshes use `maxEdges` = 9, Erie and Ontario's use
+8, so every merge order hits this. `CombineGreatLakesMesh`
+(`polaris/tasks/ocean/great_lakes/combine.py`) pads each basin's
+`cellsOnCell`/`edgesOnCell`/`verticesOnCell`/`edgesOnEdge`/`weightsOnEdge`
+to the combined mesh's own max `maxEdges` with the existing MPAS zero
+("no neighbor") sentinel before concatenating, then applies the same
+cell/edge/vertex ID offsets `merge_grids` does, generalized from two
+inputs to four and implemented in xarray (`mpas_tools.io.open_dataset`/
+`write_netcdf`) rather than raw `netCDF4.Dataset`, matching this
+package's existing convention. `sort_mesh` is not rerun on the combined
+mesh: each basin's own internal ordering is already sorted for
+performance, and sorting a disjoint-component mesh would only reorder
+which basin comes first, with no cross-basin locality to gain.
+
+The merged mesh also gains the Coriolis parameter
+(`polaris.coriolis.add_coriolis_to_dataset`), vector-reconstruction
+weights (`polaris.mesh.reconstruct.compute_reconstruction_weights`, the
+same function `polaris/tasks/e3sm/init/topo/cull/cull.py`'s
+`CullMeshStep` already calls), and a SCRIP file. The SCRIP-writing part
+of `CullMeshStep._create_scrip_file` (`MpasCellMeshDescriptor.to_scrip()`
+plus an `ncks -5` conversion to NETCDF3_64BIT_DATA, since writing that
+format directly is prohibitively slow) was factored out into
+`polaris.mesh.scrip.write_mpas_scrip_file()` so both call sites share it
+rather than duplicating the conversion step.
+
+Checked directly against the current four basins' culled meshes
+(2026/10/27 build; Superior's domain-clipping change in "Decision: Lake
+Superior's domain stops at the Soo Locks" is included): 90,998 combined
+cells (30,759 + 45,488 + 7,759 + 6,992), 289,891 edges, 198,583 vertices,
+81 cells with a fill-value/NaN `base_elevation` (handled generically by
+the initial-condition step below, not per basin), and a combined SCRIP
+`grid_area` summing to about 243,000 km^2 -- matching the Great Lakes'
+real total surface area, a useful end-to-end sanity check on the whole
+merge-plus-SCRIP pipeline.
+
 ## Implementation
 
 ### Implementation: Package layout
@@ -438,13 +518,24 @@ polaris/tasks/ocean/great_lakes/
 │   ├── coarsen.py      # CoarsenBathymetryStep: block-average before remap
 │   ├── map.py          # GreatLakesTopoMap(MappingFileStep)
 │   └── remap.py        # GreatLakesTopoRemap
-└── cull.py             # GreatLakesCullMesh
+├── cull.py             # GreatLakesCullMesh
+├── combine.py          # CombineGreatLakesMesh: merge + Coriolis/recon/SCRIP
+├── init.py             # Init: idealized T/S/velocity initial condition
+├── forward.py          # Forward: short Omega/MPAS-Ocean smoke-test run
+├── great_lakes_combined.cfg / great_lakes_init.cfg / great_lakes_forward.cfg
+└── forward.yaml
+polaris/mesh/scrip.py   # write_mpas_scrip_file(), shared with e3sm/init/topo/cull
 ```
 
 `add_great_lakes_tasks(component)` (in `polaris/tasks/ocean/great_lakes/__init__.py`)
 registers one `GreatLakesMeshTask` per basin, each with its own
-`great_lakes_mesh.cfg`, at
-`ocean/spherical/great_lakes/<basin>/mesh`.
+`great_lakes_mesh.cfg`, at `ocean/spherical/great_lakes/<basin>/mesh`, then
+three more tasks that depend on all four: `GreatLakesCombinedMeshTask`
+(`.../combined/mesh`), `GreatLakesCombinedInitTask` (`.../combined/init`),
+and `GreatLakesCombinedForwardTask` (`.../combined/forward`). The per-basin
+`GreatLakesMeshTask` exposes its `cull_mesh`/`topo_remap_culled` steps as
+attributes so the combined task can depend on them without recreating
+them (see "Implementation: Combined, init, and forward tasks" below).
 
 ### Implementation: Bathymetry input
 
@@ -462,6 +553,42 @@ when more than one source is given, it merges them (see "Algorithm
 Design: Merging Michigan and Huron's bathymetry" above). Most basins need
 only one file; `michigan_huron` needs both `michigan_lld.grd.gz` and
 `huron_lld.grd.gz`.
+
+### Implementation: Combined, init, and forward tasks
+
+Date last modified: 2026/10/28
+
+`CombineGreatLakesMesh` depends directly on each basin's `cull_mesh` and
+`topo_remap_culled` steps (via the attributes noted above), not on a
+shared/cached mesh database -- there is exactly one combined mesh, so
+there is nothing to share. `Init` (`OceanIOStep`) follows
+`polaris/tasks/ocean/realistic_global/init/initial_state.py`'s pattern
+most closely of any existing task: it combines a mesh, external
+bathymetry, and `reconstruction_weights.nc` the same way. `Forward`
+(`OceanModelStep`) follows `polaris/tasks/ocean/single_column/forward.py`'s
+pattern instead, reading `mesh.nc`/`vert_coord.nc`/`init.nc` as local
+files from an upstream step rather than through the shared-mesh-database
+mechanism `realistic_global`'s own forward step uses -- again, there is
+only the one combined mesh.
+
+`Forward.compute_cell_count()` returns a plain config number
+(`[great_lakes_forward] approx_cell_count`) rather than a formula: every
+other task's `compute_cell_count()` computes cell count from a resolution
+parameter because those tasks cover a family of resolutions, but the
+combined Great Lakes mesh is one fixed mesh, so a formula would be
+circular. Time step, barotropic time step, and horizontal viscosity are
+likewise plain `[great_lakes_forward]` config values, not scaled by a
+`dt_per_km`-style formula (the convergence framework's own convention):
+derived once, directly, against the combined mesh's own measured finest
+edge (551.6 m) and the vertical grid's `bottom_depth` (420.0 m) --
+`btr_dt` = 3.0 s against an ~8.6 s CFL limit, `del2` = 20.0 m^2/s against
+an ~3800 s stability bound at the chosen 72 s main time step, `del4` =
+1.0e6 m^4/s for roughly a 1-day damping time at the grid scale. Omega's
+own global-mesh defaults (`ViscDel2` = 1.0e3, `ViscDel4` = 1.2e11) are
+unconditionally unstable at this resolution and are not usable as-is;
+`Forward` sets `update_eos=True` so `[ocean] eos_type` also governs the
+run's actual `EosType`/`config_eos_type`, not only how the initial
+condition's tracers were written.
 
 ## Decisions
 
@@ -489,6 +616,49 @@ today, so a St. Lawrence connection will most likely be represented later
 as a river-discharge flux at Lake Ontario's outlet (as E3SM's river model
 couples to the ocean elsewhere) rather than a true open boundary.
 
+### Decision: Lake Superior's domain stops at the Soo Locks
+
+Date last modified: 2026/10/28
+
+Unlike the other three lakes, Superior's downloaded NOAA DEM
+(`superior_lld.grd.gz`) does not stop at its own shoreline: it extends
+east to lon -84.0, into Whitefish Bay and the St. Marys River approach
+toward Sault Ste. Marie -- water whose level and flow are hydraulically
+controlled by the Soo Locks (and the adjacent International Bridge), not
+representative of the open lake. This is the same class of feature the
+previous decision already excludes for the other three connecting
+channels (St. Marys River itself downstream of the locks, St. Clair
+River/Lake St. Clair/Detroit River, Niagara River); Superior's DEM simply
+happens to reach slightly past its own control point, where the other
+lakes' DEMs don't reach theirs at all.
+
+`PrepareBathymetryStep` (`polaris/tasks/ocean/great_lakes/topo/bathymetry.py`)
+gained an optional `lon_max_deg` option in `[great_lakes_topo]`
+(blank/unset by default, so the other three basins are unaffected):
+when set, it clips the prepared `bathymetry.nc` to `lon <= lon_max_deg`
+before anything downstream ever sees it, via a plain `ds.sel(lon=slice(None,
+lon_max_deg))`. Since the mesh's bounding box
+(`GreatLakesSphericalMesh.build_cell_width_lat_lon`), its shoreline
+distance field, the pre-cull wet mask (`WetMaskOnMeshStep`), and the final
+conservative remap all derive entirely from whatever `bathymetry.nc`
+contains, clipping at this one upstream step is sufficient -- no other
+code needed to change. `GreatLakesMeshTask` sets `lon_max_deg = -84.34`
+(the user's estimate of the Soo Locks/Sault Ste. Marie bridge location)
+only for `lake_name == 'superior'`, via a small `_LON_MAX_DEG_OVERRIDES`
+dict in `task.py` -- a basin domain-extent decision, not a refinement
+threshold, so it does not reopen the across-lake-consistency reasoning
+behind the shared slope/length-scale refinement config (see "Algorithm
+Design: Topographic length-scale refinement").
+
+Checked directly against the real `bathymetry.nc`: this cutoff removes
+103,594 of 14,305,485 native wet pixels (0.72%, about 606 km^2 of a
+~83,700 km^2 lake). Checking wet-pixel longitude extent by latitude band
+confirms the removed area is confined to lat 46.0-47.0, the Whitefish
+Bay/St. Marys River corridor, not the open lake basin -- so this has no
+effect on Superior's known trough or deepest point (see "Testing and
+Validation: End-to-end mesh"), only a small reduction in domain size and
+cell count.
+
 ### Decision: No per-lake water-level datum handling
 
 NOAA's "lld" grids already have each lake's own IGLD85 water-level datum
@@ -496,6 +666,107 @@ subtracted (confirmed from the files' `history` attribute, e.g.
 `grdmath erie_igld.grd 173.5 SUB = erie_lld.grd`), so `elevation < 0` is a
 uniform wet/dry test across all five files. No per-lake threshold or
 lake-ID raster is needed.
+
+### Decision: Idealized rest-state initial condition, not a climatology
+
+Date last modified: 2026/10/28
+
+No Great Lakes temperature/salinity climatology was identified to build a
+realistic initial condition from; building toward one is a much larger
+follow-on effort, out of scope here. The initial condition is instead an
+idealized, quiescent (zero-velocity) summer-stratified state: a uniform
+near-surface temperature, a `tanh` thermocline, and a cold, well-mixed
+bottom layer, all config options in `[great_lakes_init]`. This validates
+the combined mesh, vertical grid, and model plumbing end to end; it is
+not a tuned or physically realistic simulation, and should not be read as
+one.
+
+### Decision: TEOS-10, not a linear equation of state
+
+Date last modified: 2026/10/28
+
+`[ocean] eos_type = teos-10` is required, not a default left in place: a
+linear equation of state has no pressure dependence, so it cannot
+represent either the thermobaric effect (pressure's influence on the
+thermal expansion coefficient, significant over Superior's ~400 m water
+column) or the 4 degC freshwater density maximum that governs Great Lakes
+stratification and seasonal overturn -- both central to why this task
+exists on a GLS-capable Omega branch in the first place. This exercises
+TEOS-10's IAPWS-95 pure-water formulation near its pure-water (near-zero
+salinity) limit for the first time in this codebase; `eos_type = linear`
+would be a safe debugging fallback if that limit misbehaves numerically,
+but would also mean losing both effects, so it is not the default.
+`Forward.__init__` passes `update_eos=True` so this option governs the
+forward run's actual `EosType`/`config_eos_type`, not just how
+`Init` writes the initial condition's tracers.
+
+### Decision: Refine the vertical grid's near-surface resolution and layer growth rate
+
+Date last modified: 2026/10/28
+
+The original vertical grid (`vert_levels = 30`, `min_layer_thickness =
+1.5`, `max_layer_thickness = 15.0`) grew too fast with depth: layer
+thickness roughly tripled from layer 1 to layer 2 and again from layer 2
+to layer 3, reaching its 15 m asymptote by layer 5. Only 5 of the 30
+levels had their bottom shallower than 50 m, leaving the idealized
+thermocline (`thermocline_depth = 15.0`, `thermocline_width = 5.0`)
+sitting inside layers that were already 10-15 m thick, and the
+`min_bottom_depth` floor (below) carried only 2 valid levels instead of
+the intended 3 (see the superseded paragraph this replaces).
+
+`vert_levels`/`min_layer_thickness`/`max_layer_thickness` were changed to
+40/1.0/20.0 -- kept in the 30-40 range (rather than, e.g., 50, which
+would resolve the thermocline band more finely still) to limit the
+increase in column count to ~33% over the previous 30. This caps the
+growth in thickness between adjacent layers at ~13% (down from up to
+~2.7x), keeps the surface layer at 1.0 m, and keeps layer thickness
+under ~2 m down to ~10 m depth, ~2.7 m at the 15 m thermocline center,
+and ~7 m by 50 m depth (versus ~15 m by 50 m with the previous grid; 16
+of 40 levels now have their bottom shallower than 50 m).
+
+### Decision: `min_bottom_depth` = 5.0 m, sized to the vertical grid's own floor
+
+Date last modified: 2026/10/28
+
+Cells shallower than `[great_lakes_init] min_bottom_depth`, and the 81
+cells (of 90,998) with a fill-value/NaN `base_elevation`, are clamped to
+that floor before `bottomDepth` is computed. The chosen value, 5.0 m, is
+sized to the vertical grid's own `min_vert_levels * min_layer_thickness`
+(now 3.0 m, after the refinement above; 4.5 m previously), not deeper: a
+deeper floor only enlarges the shoreline artifact this clamp introduces
+(it affects 9.0% of cells at 5.0 m, versus 21.5% at a 10 m floor --
+these two figures are a function of the remapped bathymetry only and are
+unaffected by the vertical-grid refinement above) without buying
+`init_vertical_coord` anything.
+
+This does not fully eliminate the artifact `partial_cell_type = partial`
+introduces on top of it. Under the previous grid, 12,181 of 90,998 cells
+(13.4%) ended up with 2 valid vertical levels instead of 3 once the
+bottom-most partial layer was trimmed under `min_pc_fraction`, though
+none ended up with fewer than 2 or with zero -- i.e. no cell lost
+vertical structure entirely, just somewhat more than the nominal minimum
+intended. Replaying `compute_min_max_level_cell` and
+`alter_bottom_depth` against the refined 1D grid at `bottomDepth =
+min_bottom_depth = 5.0` m gives 5 valid levels rather than 3, a wider
+margin than before, which should substantially shrink or eliminate that
+shortfall -- **this has not yet been remeasured against the real merged
+mesh's bathymetry distribution; do so, and update this paragraph's
+percentage/cell-count, the next time the init step is run end-to-end.**
+
+### Decision: Per-basin background salinity
+
+Date last modified: 2026/10/28
+
+The idealized salinity field is uniform with depth and within each
+basin, but differs between basins (`[great_lakes_init]
+salinity_<basin>`): 0.05 g/kg for Superior, 0.1 g/kg for Michigan-Huron,
+0.2 g/kg for Erie and Ontario, reflecting the real Great Lakes' actual
+range of background mineralization rather than treating the whole
+combined mesh as one uniform value. `CombineGreatLakesMesh` adds a
+`basinIndex` field (and a `basin_names` global attribute giving the
+order) to `combined_topography.nc` precisely so `Init` can look up each
+cell's basin; this is the only reason that field exists; it is not
+needed by, and is not read by, the mesh-merging logic itself.
 
 ## Testing
 
@@ -617,3 +888,55 @@ interactively; all with `MPICH_GPU_SUPPORT_ENABLED=0`):
 
 See "Algorithm Design: Topographic length-scale refinement" for the full
 derivation.
+
+### Testing and Validation: Combined mesh, init, and forward
+
+Date last modified: 2026/10/28
+
+`tests/ocean/great_lakes/test_combine.py` unit-tests the merge logic
+(`_merge_meshes`/`_pad_ragged_dims`/`_apply_id_offsets`) against small,
+hand-built two- and three-basin fixtures, including one with mismatched
+`maxEdges` (4 vs. 3) specifically to exercise the padding path that
+`mpas_tools.merge_grids.merge_grids()` gets wrong (see "Algorithm Design:
+Mesh merging"). It checks: combined cell/edge/vertex counts equal the
+sum of inputs; no cell references an index outside its own basin's
+offset range (no accidental cross-basin connectivity); padded columns
+are the zero sentinel, not garbage; plain (non-connectivity) fields are
+concatenated unchanged; and global attributes that agree between inputs
+are carried forward.
+
+`CombineGreatLakesMesh`, `Init`, and `Forward` were also each run
+end-to-end via `polaris setup` + `polaris serial` on Perlmutter
+(`pm-cpu`), seeded with the four basins' real culled meshes and remapped
+bathymetry (the 2026/10/27 build referenced above):
+
+- `combine`: produced a 90,998-cell `combined_mesh.nc` with `fCell`/
+  `fEdge`/`fVertex` present, a `reconstruction_weights.nc` with no NaNs,
+  and a `combined_mesh.scrip.nc` whose `grid_area` sums to the ~243,000
+  km^2 sanity check noted above.
+- `init`: produced `mesh.nc`/`vert_coord.nc`/`init.nc` with every
+  variable `Ocean.write_horiz_mesh_dataset`/`write_vert_coord_dataset`/
+  `write_initial_state_dataset` require present (`FCell`,
+  `ReconWeightsCell`; `MinLayerCell`, `MaxLayerCell`, `BottomGeomDepth`,
+  `VertCoordMovementWeights`, `RefPseudoThickness`; `Temperature`,
+  `Salinity`, `NormalVelocity`, `PseudoThickness`, `SurfacePressure`).
+  `Temperature` ranges 4.0-19.95 degC as configured; `Salinity` is
+  exactly uniform within each basin at the configured per-basin value
+  (0.05/0.1/0.2/0.2 g/kg); no cell ends up with zero valid vertical
+  levels (see "Decision: `min_bottom_depth` = 5.0 m, sized to the
+  vertical grid's own floor" for the 2-level shortfall this does not
+  fully avoid). **This run predates the "Refine the vertical grid's
+  near-surface resolution and layer growth rate" decision above and
+  should be redone against the current 40-level grid** to confirm
+  `Temperature`'s range is unaffected (it should be, since the
+  vertical-grid change only affects how finely the same idealized
+  profile is sampled) and to remeasure the 2-level shortfall.
+- `forward`: `polaris setup` resolved `omega.yml` with the intended
+  numeric values (`TimeStep` 0000_00:01:12, `BtrTimeStep`
+  0000_00:00:03, `ViscDel2` 20, `ViscDel4` 1e+06, `BottomDragCoeff`
+  0.001, `EosType: teos-10`, convective/shear mixing enabled, `StopCriterion`
+  0000_06:00:00) and a dynamically-sized task count (456 target/44
+  minimum, from `compute_cell_count()`'s 90,998). Actually executing the
+  compiled model was not done in this session (no Omega build was
+  available); this validates the full configuration pipeline up to that
+  point, not the run's numerical behavior.
