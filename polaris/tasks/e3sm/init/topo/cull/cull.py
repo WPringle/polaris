@@ -2,17 +2,16 @@ import os
 
 import xarray as xr
 from mpas_tools.io import open_dataset, write_netcdf
-from mpas_tools.logging import check_call
 from mpas_tools.mesh.conversion import cull
 from mpas_tools.mesh.creation.sort_mesh import sort_mesh
 from mpas_tools.mesh.cull import map_culled_to_base
-from pyremap import MpasCellMeshDescriptor
 
 from polaris import Step
 from polaris.mesh.reconstruct import (
     compute_reconstruction_weights,
     get_reconstruction_validate_vars,
 )
+from polaris.mesh.scrip import write_mpas_scrip_file
 from polaris.mesh.validate import MPAS_MESH_VALIDATE_VARS
 from polaris.model_step import make_graph_file
 
@@ -219,24 +218,13 @@ class CullMeshStep(Step):
         logger.info(f'Create SCRIP file for culled {prefix} mesh')
 
         scrip_filename = mesh_filename.replace('.nc', '.scrip.nc')
-        netcdf4_filename = mesh_filename.replace('.nc', '.scrip.netcdf4.nc')
         mesh_name = f'{self.base_mesh_step.mesh_name}_{prefix}'
 
-        descriptor = MpasCellMeshDescriptor(
-            filename=mesh_filename,
+        write_mpas_scrip_file(
+            mesh_filename=mesh_filename,
+            scrip_filename=scrip_filename,
             mesh_name=mesh_name,
+            logger=logger,
         )
-        descriptor.to_scrip(netcdf4_filename)
-
-        # writing directly in NETCDF3_64BIT_DATA proved prohibitively slow
-        # so we will use ncks to convert
-        args = [
-            'ncks',
-            '-O',
-            '-5',
-            netcdf4_filename,
-            scrip_filename,
-        ]
-        check_call(args, logger)
 
         logger.info('  Done.')
