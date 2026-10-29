@@ -88,6 +88,17 @@ class PrepareBathymetryStep(Step):
         else:
             ds = datasets[0]
 
+        lon_max_raw = (section.get('lon_max_deg', fallback='') or '').strip()
+        if lon_max_raw:
+            lon_max_deg = float(lon_max_raw)
+            n_before = ds.sizes['lon']
+            ds = ds.sel(lon=slice(None, lon_max_deg))
+            logger.info(
+                f'Clipping {self.lake_name} bathymetry to lon <= '
+                f'{lon_max_deg} deg: dropped {n_before - ds.sizes["lon"]} '
+                f'of {n_before} longitude columns'
+            )
+
         # pyremap's LatLonGridDescriptor requires CF-compliant units on
         # the coordinate variables; GMT grids don't set them
         ds.lon.attrs['units'] = 'degrees_east'
