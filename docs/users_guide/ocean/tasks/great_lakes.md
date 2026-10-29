@@ -234,13 +234,18 @@ than a simplification.
 ### visualization
 
 The `viz` step plots the combined mesh: full-domain cell width and
-bathymetry (filled, with no cell outlines), plus three zoomed-in views
-with crisp, individually visible cell outlines at the Soo Locks, the
-Straits of Mackinac, and Georgian Bay -- the three places where the
-combined mesh's construction is easiest to check by eye. Outlines are not
+bathymetry (filled, with no cell outlines), plus four zoomed-in views
+with crisp, individually visible cell outlines over bathymetry at the
+Soo Locks, the Straits of Mackinac, Georgian Bay, and Lake Superior's
+southeast glacial trough -- places where the combined mesh's
+construction is easiest to check by eye, or (for the trough) where the
+mesh's slope/length-scale refinement is best seen. Outlines are not
 drawn on the full-domain plots: at 89,691 cells over the combined domain,
 outlines at that scale blend into a solid wash rather than showing
-individual cells. `debug_summary.txt` records scalar diagnostics, including
+individual cells. The zoomed views are colored by bathymetry rather than
+cell width since depth is the more informative field at that scale; each
+has its own colormap `vmin`, tuned to its own depth range (see the config
+options below). `debug_summary.txt` records scalar diagnostics, including
 each zoomed view's span-to-median-cell-width ratio as a legibility check.
 
 ```{image} images/great_lakes_combined_cell_width.png
@@ -254,6 +259,11 @@ each zoomed view's span-to-median-cell-width ratio as a legibility check.
 ```
 
 ```{image} images/great_lakes_combined_mesh_outline_georgian_bay.png
+:align: center
+:width: 500px
+```
+
+```{image} images/great_lakes_combined_mesh_outline_superior_trough.png
 :align: center
 :width: 500px
 ```
@@ -292,6 +302,36 @@ over_color = yellow
 # colormap for the remapped bathymetry.  vmin is just below the combined
 # mesh's deepest cell (about -401 m, in Lake Superior)
 [viz_combined_bathymetry]
+colormap_name = cmo.deep_r
+norm_type = linear
+norm_args = {'vmin': -410.0, 'vmax': 0.0}
+under_color = black
+over_color = tan
+
+# colormaps for the four zoomed mesh-outline views, each with its own
+# vmin tuned to that zoom's own depth range
+[viz_combined_bathymetry_soo_locks]
+colormap_name = cmo.deep_r
+norm_type = linear
+norm_args = {'vmin': -200.0, 'vmax': 0.0}
+under_color = black
+over_color = tan
+
+[viz_combined_bathymetry_straits_of_mackinac]
+colormap_name = cmo.deep_r
+norm_type = linear
+norm_args = {'vmin': -140.0, 'vmax': 0.0}
+under_color = black
+over_color = tan
+
+[viz_combined_bathymetry_georgian_bay]
+colormap_name = cmo.deep_r
+norm_type = linear
+norm_args = {'vmin': -200.0, 'vmax': 0.0}
+under_color = black
+over_color = tan
+
+[viz_combined_bathymetry_superior_trough]
 colormap_name = cmo.deep_r
 norm_type = linear
 norm_args = {'vmin': -410.0, 'vmax': 0.0}

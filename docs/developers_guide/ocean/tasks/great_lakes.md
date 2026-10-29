@@ -135,18 +135,23 @@ as attributes for exactly this purpose:
    used elsewhere, since that estimate assumes a regular hexagon and
    understates width on the clipped coastal cells this plot exists to
    show) and bathymetry, with no cell outlines drawn on either. A
-   full-domain outline plot isn't produced: at 90,021 cells, ink from the
+   full-domain outline plot isn't produced: at 89,691 cells, ink from the
    outlines would dominate the small coastal cells and wash into a solid
    color at any dpi, since the stroke width and cell size both scale with
-   it. Instead, `MESH_OUTLINE_ZOOMS` draws three small boxes (the Soo
+   it. Instead, `MESH_OUTLINE_ZOOMS` draws four small boxes (the Soo
    Locks truncation, the Michigan/Huron bathymetry seam at the Straits of
-   Mackinac, and the topographic-length-scale-refined troughs in Georgian
-   Bay) with fully legible per-cell outlines, each one chosen to show a
+   Mackinac, the topographic-length-scale-refined troughs in Georgian
+   Bay, and Lake Superior's southeast glacial trough, its deepest point)
+   with fully legible per-cell outlines, each one chosen to show a
    feature specific to how the combined mesh was built (see
-   `docs/design_docs/great_lakes_mesh.md`). `debug_summary.txt` records
-   each zoom's span-to-median-cell-width ratio so future boxes can be
-   checked against the same rule of thumb that ruled out a full-domain
-   version.
+   `docs/design_docs/great_lakes_mesh.md`). Unlike the full-domain plots,
+   the zooms are colored by `base_elevation` rather than cell width, one
+   colormap section per zoom (`viz_combined_bathymetry_<name>`) since
+   each zoom's own depth range is different enough that a single shared
+   `vmin` would wash out all but the deepest one. `debug_summary.txt`
+   records each zoom's span-to-median-cell-width ratio so future boxes
+   can be checked against the same rule of thumb that ruled out a
+   full-domain version.
 2. {py:class}`polaris.tasks.ocean.great_lakes.task.GreatLakesCombinedInitTask`
    (`ocean/spherical/great_lakes/combined/init`) runs
    {py:class}`polaris.tasks.ocean.great_lakes.init.Init`

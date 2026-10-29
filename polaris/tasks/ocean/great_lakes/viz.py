@@ -6,17 +6,22 @@ from polaris import Step
 from polaris.viz import plot_global_mpas_field
 
 #: Zoom boxes (lon_min, lon_max, lat_min, lat_max), degrees, drawn with
-#: visible cell outlines.  Each one is small enough that the outlines
-#: stay legible (see ``_ZOOM_PAD_DEG`` and the ratio written to
-#: ``debug_summary.txt``) and each shows a feature specific to the
+#: visible cell outlines over bathymetry.  Each one is small enough that
+#: the outlines stay legible (see ``_ZOOM_PAD_DEG`` and the ratio written
+#: to ``debug_summary.txt``) and each shows a feature specific to the
 #: combined mesh: the Soo Locks truncation of Superior's domain, the
-#: seam where Michigan and Huron's separate bathymetry sources join, and
-#: the topographic-length-scale refinement in Georgian Bay (see
-#: docs/design_docs/great_lakes_mesh.md).
+#: seam where Michigan and Huron's separate bathymetry sources join, the
+#: topographic-length-scale refinement in Georgian Bay, and Lake
+#: Superior's southeast glacial trough -- its deepest point, an enclosed
+#: steep-walled basin whose floor is refined by the slope/length-scale
+#: criteria rather than coastal distance (see docs/design_docs/
+#: great_lakes_mesh.md). The box is centered on the trough's deepest
+#: cell, at roughly 46.91 N, 86.60 W.
 MESH_OUTLINE_ZOOMS = {
     'soo_locks': (-85.2, -83.8, 45.8, 47.0),
     'straits_of_mackinac': (-85.6, -84.2, 45.4, 46.3),
     'georgian_bay': (-82.0, -79.6, 44.4, 46.3),
+    'superior_trough': (-87.2, -85.8, 46.5, 47.3),
 }
 
 #: Padding, in degrees, applied when selecting cells for a zoom box so
@@ -126,12 +131,15 @@ class VizCombinedGreatLakesMesh(Step):
                 )
                 plot_global_mpas_field(
                     mesh_filename='combined_mesh.nc',
-                    da=da_width[cell_indices],
+                    da=base_elevation[cell_indices],
                     out_filename=f'combined_mesh_outline_{name}.png',
                     config=config,
-                    colormap_section='viz_combined_cell_width',
-                    title=f'Combined Great Lakes mesh: {name} outlines',
-                    colorbar_label='cell width (km)',
+                    colormap_section=f'viz_combined_bathymetry_{name}',
+                    title=(
+                        f'Combined Great Lakes mesh: {name} outlines '
+                        f'(base_elevation, m)'
+                    ),
+                    colorbar_label='elevation (m)',
                     plot_land=False,
                     extent=box,
                     patch_edge_color='black',
